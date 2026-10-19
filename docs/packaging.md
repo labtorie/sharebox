@@ -20,6 +20,8 @@
 | `scripts/build.sh web server cli` | Just the guest app and Go binaries |
 | `scripts/build.sh desktop-mac` | `Sharebox-<v>-macos-universal.dmg` (Apple Silicon + Intel) |
 | `scripts/build.sh desktop-win` | `Sharebox-<v>-windows-x64.exe` (+ `-setup.exe` with makensis) |
+| `scripts/package-linux.sh` (on Linux) | `sharebox_<v>_amd64.deb` and `Sharebox-<v>-linux-amd64.tar.gz` |
+| GitHub → Actions → **Linux desktop build** → Run workflow | Same Linux packages built on GitHub (no Linux machine needed); download them from the run's artifacts. Pushing a `v*` tag runs it too. |
 | `VERSION=1.2.3 scripts/build.sh` | Set the version in file names |
 | `SHAREBOX_DEFAULT_SERVER=https://share.example.org scripts/build.sh` | Build the shared server address into the desktop app and CLI, so hosts need no setup (it can still be changed in Settings). Alternatively set `DefaultServerURL` in `internal/config/config.go`. |
 
@@ -33,7 +35,17 @@ both the server and the host, so build `web` first whenever it changes.
 | macOS Apple Silicon (arm64) | ✅ (universal binary) | ✅ launched and driven via `wails dev` |
 | macOS Intel (x86_64) | ✅ (universal binary) | ❌ no Intel Mac available |
 | Windows x64 exe + NSIS installer | ✅ cross-compiled | ❌ no Windows machine available |
+| Linux x64 desktop (.deb, .tar.gz) | ✅ on GitHub Actions (Ubuntu 22.04) | ✅ launched under Xvfb in CI |
 | Server/CLI linux, macOS, windows (amd64/arm64) | ✅ | macOS arm64 only |
+
+## Linux notes
+
+The Linux app needs GTK 3 and WebKitGTK 4.1 at runtime (Ubuntu 22.04+,
+Debian 12+, Fedora 39+); the `.deb` declares them as dependencies, so
+`sudo apt install ./sharebox_1.0.0_amd64.deb` pulls them in. It can't be
+cross-compiled from macOS or Windows because it links against those system
+libraries. Settings live in `~/.config/Sharebox`. There is no tray icon (same
+Wails v2 limitation as elsewhere).
 
 ## macOS signing and notarization
 

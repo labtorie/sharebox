@@ -2,7 +2,7 @@
 # Builds every Sharebox artifact that the current machine can produce.
 #
 #   scripts/build.sh            # everything available
-#   scripts/build.sh web server # selected targets: web server cli desktop-mac desktop-win
+#   scripts/build.sh web server # selected targets: web server server-pkg cli desktop-mac desktop-win desktop-linux
 #
 # Output goes to dist/. Desktop builds need Wails (go install
 # github.com/wailsapp/wails/v2/cmd/wails@v2.17.0); macOS app bundles can
@@ -24,7 +24,7 @@ if [ -n "${SHAREBOX_DEFAULT_SERVER:-}" ]; then
 fi
 WAILS="${WAILS:-$(command -v wails || echo "$HOME/go/bin/wails")}"
 TARGETS=("$@")
-[ ${#TARGETS[@]} -eq 0 ] && TARGETS=(web server server-pkg cli desktop-mac desktop-win)
+[ ${#TARGETS[@]} -eq 0 ] && TARGETS=(web server server-pkg cli desktop-mac desktop-win desktop-linux)
 want() { [[ " ${TARGETS[*]} " == *" $1 "* ]]; }
 mkdir -p dist bin
 
@@ -83,6 +83,15 @@ if want desktop-mac; then
     echo "    dist/desktop/Sharebox-$VERSION-macos-universal.dmg (ad-hoc signed; see docs/packaging.md to sign + notarize)"
   else
     echo "==> skipping macOS desktop build (requires macOS)"
+  fi
+fi
+
+if want desktop-linux; then
+  if [ "$(uname)" = Linux ]; then
+    VERSION="$VERSION" scripts/package-linux.sh
+  else
+    echo "==> skipping Linux desktop build (needs Linux: run scripts/package-linux.sh there,"
+    echo "    or the 'Linux desktop build' GitHub Actions workflow)"
   fi
 fi
 
