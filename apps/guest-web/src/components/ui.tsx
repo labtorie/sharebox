@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode, type ButtonHTMLAttributes } from "react";
 import {
   Archive, File, FileAudio, FileCode, FileImage, FileSpreadsheet, FileText, FileVideo, Folder, Presentation, X,
-  Moon, Sun, Monitor,
+  Moon, Sun,
 } from "lucide-react";
 import { fileType } from "../lib/format";
 
@@ -143,42 +143,54 @@ export function useToasts() {
 
 // --- theme -----------------------------------------------------------------
 
-export type Theme = "system" | "light" | "dark";
+export type Theme = "light" | "dark";
 
+/**
+ * Returns the effective theme and a setter. Until the user picks one, the
+ * page follows the system setting (and keeps following it if it changes).
+ */
 export function useTheme(): [Theme, (t: Theme) => void] {
-  const [theme, setTheme] = useState<Theme>(() => {
+  const mq = window.matchMedia("(prefers-color-scheme: dark)");
+  const [systemDark, setSystemDark] = useState(mq.matches);
+  const [chosen, setChosen] = useState<Theme | null>(() => {
     try {
-      return (localStorage.getItem("sbx-theme") as Theme) || "system";
+      const v = localStorage.getItem("sbx-theme");
+      return v === "light" || v === "dark" ? v : null;
     } catch {
-      return "system";
+      return null;
     }
   });
   useEffect(() => {
-    const mq = window.matchMedia("(prefers-color-scheme: dark)");
-    const apply = () => document.documentElement.classList.toggle("dark", theme === "dark" || (theme === "system" && mq.matches));
-    apply();
-    mq.addEventListener("change", apply);
+    const h = (e: MediaQueryListEvent) => setSystemDark(e.matches);
+    mq.addEventListener("change", h);
+    return () => mq.removeEventListener("change", h);
+  }, [mq]);
+  const theme: Theme = chosen ?? (systemDark ? "dark" : "light");
+  useEffect(() => {
+    document.documentElement.classList.toggle("dark", theme === "dark");
+  }, [theme]);
+  const set = (t: Theme) => {
+    setChosen(t);
     try {
-      localStorage.setItem("sbx-theme", theme);
+      localStorage.setItem("sbx-theme", t);
     } catch {
       /* ignore */
     }
-    return () => mq.removeEventListener("change", apply);
-  }, [theme]);
-  return [theme, setTheme];
+  };
+  return [theme, set];
 }
 
 export function ThemeToggle({ theme, setTheme }: { theme: Theme; setTheme: (t: Theme) => void }) {
-  const next: Record<Theme, Theme> = { system: "light", light: "dark", dark: "system" };
-  const Icon = theme === "light" ? Sun : theme === "dark" ? Moon : Monitor;
+  const dark = theme === "dark";
+  const label = dark ? "Switch to light theme" : "Switch to dark theme";
   return (
     <button
-      onClick={() => setTheme(next[theme])}
+      onClick={() => setTheme(dark ? "light" : "dark")}
       className="rounded-xl p-2 text-zinc-500 transition hover:bg-zinc-100 dark:hover:bg-zinc-800"
-      title={`Theme: ${theme}`}
-      aria-label="Change theme"
+      title={label}
+      aria-label={label}
     >
-      <Icon className="h-4.5 w-4.5" />
+      {dark ? <Sun className="h-4.5 w-4.5" /> : <Moon className="h-4.5 w-4.5" />}
     </button>
   );
 }

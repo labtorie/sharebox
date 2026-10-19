@@ -4,7 +4,7 @@ import {
   Router, Server, Settings as SettingsIcon, ShieldAlert, Users, Waypoints, X, Zap, AlertTriangle, FolderArchive,
 } from "lucide-react";
 import * as Go from "../wailsjs/go/main/App";
-import { EventsOn } from "../wailsjs/runtime/runtime";
+import { Environment, EventsOn } from "../wailsjs/runtime/runtime";
 import type { Check as CheckT, Settings, Status, Transfer } from "./types";
 import { Button, Dialog, FileIcon, Logo, Progress, TextInput, cx } from "./ui";
 import { formatBytes, formatSpeed } from "./format";
@@ -31,6 +31,11 @@ export default function App() {
   const [copied, setCopied] = useState(false);
   const [qr, setQr] = useState<string | null>(null);
   const [confirmRegen, setConfirmRegen] = useState(false);
+  // macOS draws the window buttons inside our header (hidden-inset title bar).
+  const [isMac, setIsMac] = useState(navigator.userAgent.includes("Mac"));
+  useEffect(() => {
+    Environment().then((e) => setIsMac(e.platform === "darwin")).catch(() => {});
+  }, []);
 
   useEffect(() => {
     Go.GetSettings().then((s) => setSettings(s as unknown as Settings));
@@ -109,7 +114,7 @@ export default function App() {
   return (
     <div className="flex h-full flex-col">
       {/* Title bar (draggable; leaves room for macOS traffic lights) */}
-      <header className="drag flex h-14 shrink-0 items-center gap-3 border-b border-zinc-200/70 pr-4 pl-20 dark:border-zinc-800/70">
+      <header className={cx("drag flex h-14 shrink-0 items-center gap-3 border-b border-zinc-200/70 pr-4 dark:border-zinc-800/70", isMac ? "pl-24" : "pl-4")}>
         <Logo className="h-7 w-7" />
         <span className="text-[15px] font-semibold tracking-tight">Sharebox</span>
         <StatusPill status={status} />

@@ -16,6 +16,9 @@ self.addEventListener("message", (e) => {
   const d = e.data || {};
   if (d.type === "register" && e.ports[0]) {
     downloads.set(d.id, { ...d, port: e.ports[0] });
+    // Confirm, so the page only starts the download request once we know
+    // about it (message and fetch events are not ordered).
+    e.ports[0].postMessage("registered");
   }
   // "ping" messages from the page keep this worker alive during long downloads.
 });
@@ -31,6 +34,7 @@ self.addEventListener("fetch", (e) => {
   }
   downloads.delete(id);
   const port = dl.port;
+  port.postMessage("started");
   let pending = null;
   port.onmessage = (m) => {
     const p = pending;

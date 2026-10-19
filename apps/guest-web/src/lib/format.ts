@@ -1,6 +1,6 @@
 export function formatBytes(n: number): string {
   if (n < 0 || !isFinite(n)) return "—";
-  if (n < 1024) return `${n} B`;
+  if (n < 1023.5) return `${Math.round(n)} B`;
   const units = ["KB", "MB", "GB", "TB", "PB"];
   let v = n / 1024;
   let i = 0;
@@ -12,7 +12,7 @@ export function formatBytes(n: number): string {
 }
 
 export function formatSpeed(bps: number): string {
-  return bps > 0 ? `${formatBytes(bps)}/s` : "";
+  return bps >= 0.5 ? `${formatBytes(bps)}/s` : "";
 }
 
 export function formatDate(iso: string): string {

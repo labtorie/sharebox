@@ -334,7 +334,26 @@ export class Transfers {
         (reader as ReadableStreamDefaultReader<Uint8Array> | null)?.cancel().catch(() => {});
         finish(new DOMException("Aborted", "AbortError"));
       });
+      let started = false;
+      const startTimer = setTimeout(() => {
+        if (!started) {
+          ch.port1.postMessage({ error: "not started" });
+          finish(new Error("The download could not start; try again"));
+        }
+      }, 20_000);
       ch.port1.onmessage = async (m) => {
+        if (m.data === "registered") {
+          iframe = document.createElement("iframe");
+          iframe.hidden = true;
+          iframe.src = `/__sbx_dl/${id}/${encodeURIComponent(j.name)}`;
+          document.body.appendChild(iframe);
+          return;
+        }
+        if (m.data === "started") {
+          started = true;
+          clearTimeout(startTimer);
+          return;
+        }
         if (m.data === "cancel") {
           j.abort.abort();
           return;
@@ -354,10 +373,6 @@ export class Transfers {
         }
       };
       sw.postMessage({ type: "register", id, name: j.name, size: j.size }, [ch.port2]);
-      iframe = document.createElement("iframe");
-      iframe.hidden = true;
-      iframe.src = `/__sbx_dl/${id}/${encodeURIComponent(j.name)}`;
-      document.body.appendChild(iframe);
     });
   }
 }
