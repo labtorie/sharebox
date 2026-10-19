@@ -99,7 +99,7 @@ func TestPCPMapping(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := m.Delete(context.Background(), mp); err != nil || !g.deleted.Load() {
-		t.Fatalf("delete: %v deleted=%v", err, g.deleted)
+		t.Fatalf("delete: %v deleted=%v", err, g.deleted.Load())
 	}
 }
 

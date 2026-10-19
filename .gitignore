@@ -1,10 +1,11 @@
 node_modules/
-dist/
+/dist/
 bin/
 .dev-config/
 apps/desktop/build/bin/
 apps/desktop/build/windows/installer/tmp/
-apps/desktop/frontend/dist/
+apps/desktop/frontend/dist/*
+!apps/desktop/frontend/dist/.gitkeep
 apps/guest-web/test-results/
 apps/guest-web/playwright-report/
 sharebox-data/
