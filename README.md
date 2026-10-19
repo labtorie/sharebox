@@ -79,9 +79,13 @@ Sharing with friends needs a deployed coordination server.
 
 ## Sharing with real people: deploy a coordination server
 
-Sharebox needs a small public server for links, signalling and the relay. **No
-public instance is bundled**, and nothing in the code points at a working
-default domain. You need:
+Sharebox needs a small public server for links, signalling and the relay.
+This build has the shared server `https://sharebox-ppsus.waw0.amvera.tech`
+built in (`DefaultServerURL` in `internal/config/config.go`), so hosts don't
+have to configure anything. It runs on Amvera, which forwards HTTP only, so
+there is **no TURN relay** there: guests connect peer-to-peer, and guests on
+networks that block that can't connect. To run your own server instead, or a
+full one with the relay, You need:
 
 * a VPS with a public IPv4 address,
 * a domain name (e.g. `share.example.org`) pointing at it,

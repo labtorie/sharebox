@@ -36,7 +36,7 @@ type Settings struct {
 //	SHAREBOX_DEFAULT_SERVER=https://share.example.org scripts/build.sh
 //
 // which passes -ldflags "-X sharebox/internal/config.DefaultServerURL=…".
-var DefaultServerURL = ""
+var DefaultServerURL = "https://sharebox-ppsus.waw0.amvera.tech"
 
 // DefaultServer returns the server to use when none is configured. The
 // SHAREBOX_SERVER environment variable (development) takes precedence.
