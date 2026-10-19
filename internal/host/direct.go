@@ -29,14 +29,13 @@ func (e *Engine) mapPorts(ctx context.Context) {
 	e.mu.Lock()
 	old := e.mappings
 	e.mappings = nil
-	udp := e.udp
+	port := e.udpPort
 	e.mu.Unlock()
 	e.unmap(old)
-	if udp == nil {
+	if port == 0 {
 		return
 	}
 	e.update(func(s *Status) { s.Mapping = Check{State: CheckPending} })
-	port := udp.LocalAddr().(*net.UDPAddr).Port
 	mctx, cancel := context.WithTimeout(ctx, 12*time.Second)
 	defer cancel()
 
@@ -133,26 +132,19 @@ func (e *Engine) unmap(maps []*network.Mapping) {
 // skipped while guests are connected.
 func (e *Engine) rebuildRTC(publicIP string) {
 	e.mu.Lock()
-	h, udp := e.rtcHost, e.udp
+	h := e.rtcHost
 	e.mu.Unlock()
 	if h == nil || len(h.Peers()) > 0 {
 		return
 	}
-	port := udp.LocalAddr().(*net.UDPAddr).Port
-	h.Close() // closes the mux and the socket
-	udp.Close()
-	nu, err := net.ListenPacket("udp4", fmt.Sprintf(":%d", port))
+	h.Close() // frees the port for the new endpoint
+	nh, err := e.newRTC(publicIP)
 	if err != nil {
 		e.addError("Could not reopen the network port: " + err.Error())
 		return
 	}
-	nh, err := e.newRTC(nu, publicIP, false)
-	if err != nil {
-		nu.Close()
-		return
-	}
 	e.mu.Lock()
-	e.rtcHost, e.udp = nh, nu
+	e.rtcHost = nh
 	e.mu.Unlock()
 }
 

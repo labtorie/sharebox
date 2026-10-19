@@ -74,6 +74,10 @@ type Status struct {
 	ExpiresAt  time.Time          `json:"expiresAt,omitzero"`
 	PreviewURL string             `json:"previewUrl,omitempty"`
 	Password   bool               `json:"password"`
+	// Peers are WebRTC connections with their network path details.
+	Peers []rtc.PeerInfo `json:"peers"`
+	// PublicIP is this host's public address as seen from the internet.
+	PublicIP string `json:"publicIp,omitempty"`
 }
 
 // Engine runs at most one sharing session at a time.
@@ -94,7 +98,6 @@ type Engine struct {
 	tracker   *transfers.Tracker
 	coord     *coord.Client
 	rtcHost   *rtc.Host
-	udp       net.PacketConn
 	preview   *http.Server
 	direct    *directServer
 	mapper    *network.Mapper
@@ -105,7 +108,10 @@ type Engine struct {
 	ice       []webrtc.ICEServer
 	checkMu   sync.Mutex
 	device    config.Device
+	udpPort   int  // ICE port (all interfaces), mapped on the router
+	loopback  bool // tests: include loopback candidates
 	wg        sync.WaitGroup
+	stunIP    string // public address reported by STUN
 }
 
 // New creates an engine.
@@ -180,9 +186,19 @@ func (e *Engine) recomputeLocked() {
 // Status returns the current snapshot.
 func (e *Engine) Status() Status {
 	e.tracker.Tick()
+	var peers []rtc.PeerInfo
+	e.withRTC(func(h *rtc.Host) { peers = h.Peers() })
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	s := e.st
+	s.Peers = peers
+	if s.Peers == nil {
+		s.Peers = []rtc.PeerInfo{}
+	}
+	s.PublicIP = e.stunIP
+	if s.PublicIP == "" {
+		s.PublicIP = e.reg.ObservedIP
+	}
 	s.Stats = e.tracker.Snapshot()
 	s.Errors = append([]string{}, e.st.Errors...)
 	if !s.LinkReady {
@@ -371,15 +387,21 @@ func (e *Engine) startLocal(ctx context.Context, files *fileserver.Server, o Sta
 		_ = e.store.SaveDevice(dev)
 		e.device = dev
 	}
-	udp, err := net.ListenPacket("udp4", fmt.Sprintf(":%d", dev.UDPPort))
-	if err != nil {
-		udp, err = net.ListenPacket("udp4", ":0")
+	// Reserve the stable port (or any free one if it's taken); the WebRTC
+	// endpoint then opens one socket per real network interface on it.
+	port := dev.UDPPort
+	if probe, err := net.ListenPacket("udp4", fmt.Sprintf(":%d", port)); err == nil {
+		probe.Close()
+	} else {
+		probe, err := net.ListenPacket("udp4", ":0")
 		if err != nil {
 			return fmt.Errorf("cannot open a network port: %w", err)
 		}
+		port = probe.LocalAddr().(*net.UDPAddr).Port
+		probe.Close()
 	}
-	e.udp = udp
-	h, err := e.newRTC(udp, "", o.AllowLoopback)
+	e.udpPort, e.loopback = port, o.AllowLoopback
+	h, err := e.newRTC("")
 	if err != nil {
 		return err
 	}
@@ -390,7 +412,7 @@ func (e *Engine) startLocal(ctx context.Context, files *fileserver.Server, o Sta
 	return nil
 }
 
-func (e *Engine) newRTC(udp net.PacketConn, publicIP string, loopback bool) (*rtc.Host, error) {
+func (e *Engine) newRTC(publicIP string) (*rtc.Host, error) {
 	return rtc.New(rtc.Config{
 		Handler:   e.files,
 		AccessKey: func() string { e.mu.Lock(); defer e.mu.Unlock(); return e.accessKey },
@@ -407,7 +429,12 @@ func (e *Engine) newRTC(udp net.PacketConn, publicIP string, loopback bool) (*rt
 				_ = cc.Send(p.Envelope{Type: p.MsgSignal, Peer: peer, Data: d})
 			}
 		},
-		UDPConn: udp, PublicIP: publicIP, AllowLoopback: loopback, Logger: e.log, OnChange: e.changed,
+		UDPPort: e.udpPort, PublicIP: publicIP, AllowLoopback: e.loopback, Logger: e.log, OnChange: e.changed,
+		PublicIPs: func() []string {
+			e.mu.Lock()
+			defer e.mu.Unlock()
+			return []string{e.stunIP, e.reg.ObservedIP}
+		},
 	})
 }
 
@@ -488,10 +515,16 @@ func (e *Engine) verify() {
 		case err != nil:
 			e.update(func(s *Status) { s.P2P = Check{State: CheckUnavailable, Detail: "STUN check failed: " + err.Error()} })
 		case rep.Symmetric:
+			e.mu.Lock()
+			e.stunIP = rep.PublicIP
+			e.mu.Unlock()
 			e.update(func(s *Status) {
 				s.P2P = Check{State: CheckWarn, Detail: "Your network uses strict (symmetric) NAT; most guests will need the relay"}
 			})
 		default:
+			e.mu.Lock()
+			e.stunIP = rep.PublicIP
+			e.mu.Unlock()
 			e.update(func(s *Status) { s.P2P = Check{State: CheckOK, Detail: "Public address " + rep.PublicIP} })
 		}
 	}()
@@ -564,7 +597,7 @@ func (e *Engine) Stop() {
 	}
 	e.st.State = "stopping"
 	cc, h, files, root, prev, dir := e.coord, e.rtcHost, e.files, e.root, e.preview, e.direct
-	maps, udp, cancel := e.mappings, e.udp, e.cancel
+	maps, cancel := e.mappings, e.cancel
 	e.mu.Unlock()
 	e.changed()
 
@@ -587,9 +620,6 @@ func (e *Engine) Stop() {
 	if prev != nil {
 		prev.Close()
 	}
-	if udp != nil {
-		udp.Close()
-	}
 	e.unmap(maps)
 	e.wg.Wait()
 	if files != nil {
@@ -601,7 +631,7 @@ func (e *Engine) Stop() {
 	e.tracker.Reset()
 	e.mu.Lock()
 	e.cancel, e.ctx, e.coord, e.rtcHost, e.files, e.root, e.preview, e.direct = nil, nil, nil, nil, nil, nil, nil, nil
-	e.mappings, e.udp, e.accessKey = nil, nil, ""
+	e.mappings, e.udpPort, e.accessKey = nil, 0, ""
 	e.st = idleStatus()
 	e.mu.Unlock()
 	e.changed()
@@ -617,7 +647,7 @@ func (e *Engine) RegenerateLink() error {
 	}
 	key := security.RandomToken(32)
 	e.accessKey = key
-	files, cc, h, udp := e.files, e.coord, e.rtcHost, e.udp
+	files, cc, h := e.files, e.coord, e.rtcHost
 	pub := ""
 	if h != nil && e.st.Mapping.State == CheckOK {
 		pub = e.reg.ObservedIP
@@ -629,18 +659,11 @@ func (e *Engine) RegenerateLink() error {
 	files.RevokeAll()
 	e.tracker.Reset()
 	if h != nil {
-		h.Close()
-		// The ICE UDP mux was closed with the host; rebind the same port.
-		port := udp.LocalAddr().(*net.UDPAddr).Port
-		udp.Close()
-		nu, err := net.ListenPacket("udp4", fmt.Sprintf(":%d", port))
-		if err != nil {
-			nu, _ = net.ListenPacket("udp4", ":0")
-		}
-		nh, err := e.newRTC(nu, pub, false)
+		h.Close() // closes the ICE sockets, freeing the port for the new endpoint
+		nh, err := e.newRTC(pub)
 		if err == nil {
 			e.mu.Lock()
-			e.rtcHost, e.udp = nh, nu
+			e.rtcHost = nh
 			e.mu.Unlock()
 		}
 	}

@@ -6,11 +6,12 @@ import {
 import * as Go from "../wailsjs/go/main/App";
 import { Environment, EventsOn } from "../wailsjs/runtime/runtime";
 import type { Check as CheckT, Settings, Status, Transfer } from "./types";
+import { GuestRow, peerFor } from "./RouteDetails";
 import { Button, Dialog, FileIcon, Logo, Progress, TextInput, cx } from "./ui";
 import { formatBytes, formatSpeed } from "./format";
 
 const idle: Status = {
-  state: "idle", linkReady: false, headline: "Not sharing", errors: [], password: false,
+  state: "idle", linkReady: false, headline: "Not sharing", errors: [], password: false, peers: [],
   server: { state: "off", detail: "" }, direct: { state: "off", detail: "" }, p2p: { state: "off", detail: "" },
   relay: { state: "off", detail: "" }, mapping: { state: "off", detail: "" },
   folder: { path: "", name: "", size: 0, files: 0, scanning: false, partial: false },
@@ -267,17 +268,7 @@ export default function App() {
               ) : (
                 <ul className="mb-2 divide-y divide-zinc-100 dark:divide-zinc-800">
                   {guests.map((g) => (
-                    <li key={g.id} className="flex items-center gap-3 py-2 text-sm">
-                      <TransportBadge t={g.transport} />
-                      <span className="min-w-0 flex-1 truncate">
-                        {g.label || "Guest"}
-                        {g.route && g.route !== "relay" && <span className="ml-1.5 text-xs text-zinc-500">· {g.route}</span>}
-                      </span>
-                      <span className="text-xs text-zinc-500">since {new Date(g.since).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
-                      <button onClick={() => Go.RevokeGuest(g.id)} className="rounded-lg p-1 text-zinc-400 hover:bg-zinc-100 hover:text-red-600 dark:hover:bg-zinc-800" title="Disconnect this guest">
-                        <X className="h-4 w-4" />
-                      </button>
-                    </li>
+                    <GuestRow key={g.id} g={g} peer={peerFor(status, g.id)} />
                   ))}
                 </ul>
               )}

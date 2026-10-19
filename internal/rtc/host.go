@@ -8,9 +8,11 @@ package rtc
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
 	"regexp"
 	"strings"
 	"sync"
@@ -36,10 +38,10 @@ type Config struct {
 	ICEServers func() []webrtc.ICEServer
 	// SendSignal delivers a payload to a guest via the coordination server.
 	SendSignal func(peer string, d *p.SignalPayload)
-	// UDPConn, if set, is used for all ICE traffic (single port), which lets
-	// the host map one UDP port on the router.
-	UDPConn net.PacketConn
-	// PublicIP is advertised as a server-reflexive candidate on UDPConn's
+	// UDPPort, if set, carries all ICE traffic on one port (one socket per
+	// real network interface), which lets the host map it on the router.
+	UDPPort int
+	// PublicIP is advertised as a server-reflexive candidate on UDPPort's
 	// port when a router port mapping exists.
 	PublicIP string
 	// AllowLoopback includes loopback candidates (tests only).
@@ -47,6 +49,9 @@ type Config struct {
 	Logger        *slog.Logger
 	// OnChange is called when peers connect, disconnect or change path.
 	OnChange func()
+	// PublicIPs returns this host's known public addresses (from STUN and
+	// the coordination server), used to recognise router hair-pinning.
+	PublicIPs func() []string
 }
 
 // Host manages guest peer connections.
@@ -61,15 +66,16 @@ type Host struct {
 }
 
 type peer struct {
-	id        string
-	pc        *webrtc.PeerConnection
-	sess      *tunnel.Session
-	transport atomic.Value // string
-	route     atomic.Value // string
-	pending   []webrtc.ICECandidateInit
-	haveRD    bool
-	created   time.Time
-	guests    map[string]bool
+	id          string
+	pc          *webrtc.PeerConnection
+	sess        *tunnel.Session
+	transport   atomic.Value // string
+	route       atomic.Value // string
+	pending     []webrtc.ICECandidateInit
+	haveRD      bool
+	created     time.Time
+	connectedAt time.Time
+	guests      map[string]bool
 }
 
 // TransportTuning holds the WebRTC transport knobs that affect throughput.
@@ -121,11 +127,37 @@ func (t TransportTuning) settingEngine() webrtc.SettingEngine {
 // SettingEngine returns a setting engine with the given tuning (benchmarks).
 func (t TransportTuning) SettingEngine() webrtc.SettingEngine { return t.settingEngine() }
 
-// PeerInfo describes a connected peer.
+// Endpoint is one side of the network path.
+type Endpoint struct {
+	Type     string `json:"type"`    // host | srflx | prflx | relay
+	Address  string `json:"address"` // IP address
+	Port     int    `json:"port"`
+	Protocol string `json:"protocol"` // udp | tcp
+	// Related is the underlying address for srflx/relay candidates
+	// (e.g. the LAN address behind a public one).
+	Related string `json:"related,omitempty"`
+}
+
+// PathInfo describes the network path of a guest connection.
+type PathInfo struct {
+	Kind          string    `json:"kind"`  // p2p | relay
+	Route         string    `json:"route"` // local network | internet | router loopback | relay
+	Local         Endpoint  `json:"local"`
+	Remote        Endpoint  `json:"remote"`
+	RTTMs         float64   `json:"rttMs"`
+	BytesSent     uint64    `json:"bytesSent"`
+	BytesReceived uint64    `json:"bytesReceived"`
+	CwndBytes     uint32    `json:"cwndBytes"` // SCTP congestion window
+	Since         time.Time `json:"since"`
+}
+
+// PeerInfo describes a peer connection.
 type PeerInfo struct {
-	ID        string
-	Transport string
-	Connected bool
+	ID        string    `json:"id"`
+	Transport string    `json:"transport"`
+	Connected bool      `json:"connected"`
+	Guests    []string  `json:"guests"`
+	Path      *PathInfo `json:"path,omitempty"`
 }
 
 // New creates a host endpoint.
@@ -143,10 +175,35 @@ func New(cfg Config) (*Host, error) {
 	// router's public address (slow on many routers). We only query: our own
 	// host candidates stay plain IPs so guests can always reach us.
 	se.SetICEMulticastDNSMode(ice.MulticastDNSModeQueryOnly)
+	// Don't offer VPN tunnel addresses as candidates: when both devices are
+	// on the same VPN they would look "local" to each other and the data
+	// would detour through the VPN server. Guests behind a VPN still reach
+	// us via the real network. SHAREBOX_ALLOW_VPN_INTERFACES=1 restores them
+	// (e.g. for sharing inside a VPN mesh such as Radmin or ZeroTier).
+	if os.Getenv("SHAREBOX_ALLOW_VPN_INTERFACES") == "" {
+		se.SetInterfaceFilter(func(name string) bool { return !IsTunnelInterface(name) })
+	}
 	h := &Host{cfg: cfg, log: cfg.Logger, peers: map[string]*peer{}}
-	if cfg.UDPConn != nil {
-		h.mux = webrtc.NewICEUDPMux(nil, cfg.UDPConn)
-		se.SetICEUDPMux(h.mux)
+	if cfg.UDPPort > 0 {
+		opts := []ice.UDPMuxFromPortOption{
+			ice.UDPMuxFromPortWithNetworks(ice.NetworkTypeUDP4),
+			// Large socket buffers avoid packet drops during bursts; Windows'
+			// small defaults are a known WebRTC throughput limit.
+			ice.UDPMuxFromPortWithReadBufferSize(4 << 20),
+			ice.UDPMuxFromPortWithWriteBufferSize(4 << 20),
+		}
+		if os.Getenv("SHAREBOX_ALLOW_VPN_INTERFACES") == "" {
+			opts = append(opts, ice.UDPMuxFromPortWithInterfaceFilter(func(name string) bool { return !IsTunnelInterface(name) }))
+		}
+		if cfg.AllowLoopback {
+			opts = append(opts, ice.UDPMuxFromPortWithLoopback())
+		}
+		mux, err := ice.NewMultiUDPMuxFromPort(cfg.UDPPort, opts...)
+		if err != nil {
+			return nil, fmt.Errorf("cannot open the network port: %w", err)
+		}
+		h.mux = mux
+		se.SetICEUDPMux(mux)
 		se.SetNetworkTypes([]webrtc.NetworkType{webrtc.NetworkTypeUDP4})
 		if cfg.PublicIP != "" {
 			se.SetNAT1To1IPs([]string{cfg.PublicIP}, webrtc.ICECandidateTypeSrflx)
@@ -173,13 +230,74 @@ func (h *Host) Close() {
 // Peers lists peer connections.
 func (h *Host) Peers() []PeerInfo {
 	h.mu.Lock()
-	defer h.mu.Unlock()
-	var out []PeerInfo
+	type snap struct {
+		pr     *peer
+		guests []string
+		conn   bool
+	}
+	var list []snap
 	for _, pr := range h.peers {
-		t, _ := pr.transport.Load().(string)
-		out = append(out, PeerInfo{ID: pr.id, Transport: t, Connected: pr.sess != nil})
+		var g []string
+		for id := range pr.guests {
+			g = append(g, id)
+		}
+		list = append(list, snap{pr, g, pr.sess != nil})
+	}
+	h.mu.Unlock() // pion calls below must not run under our lock
+
+	var out []PeerInfo
+	for _, sn := range list {
+		t, _ := sn.pr.transport.Load().(string)
+		pi := PeerInfo{ID: sn.pr.id, Transport: t, Connected: sn.conn, Guests: sn.guests}
+		if sn.conn {
+			pi.Path = h.pathInfo(sn.pr)
+		}
+		out = append(out, pi)
 	}
 	return out
+}
+
+// pathInfo reads the selected ICE candidate pair and its statistics.
+func (h *Host) pathInfo(pr *peer) *PathInfo {
+	sctp := pr.pc.SCTP()
+	if sctp == nil {
+		return nil
+	}
+	ice := sctp.Transport().ICETransport()
+	pair, err := ice.GetSelectedCandidatePair()
+	if err != nil || pair == nil {
+		return nil
+	}
+	ep := func(c *webrtc.ICECandidate) Endpoint {
+		e := Endpoint{Type: c.Typ.String(), Address: c.Address, Port: int(c.Port), Protocol: c.Protocol.String()}
+		if c.RelatedAddress != "" {
+			e.Related = net.JoinHostPort(c.RelatedAddress, fmt.Sprint(c.RelatedPort))
+		}
+		return e
+	}
+	pi := &PathInfo{Local: ep(pair.Local), Remote: ep(pair.Remote), Since: pr.connectedAt}
+	pi.Kind, _ = pr.transport.Load().(string)
+	var public []string
+	if h.cfg.PublicIPs != nil {
+		public = h.cfg.PublicIPs()
+	}
+	if h.cfg.PublicIP != "" {
+		public = append(public, h.cfg.PublicIP)
+	}
+	pi.Route = ClassifyRoute(pi.Local.Type, pi.Remote.Type, pi.Remote.Address, public)
+	if st, ok := ice.GetSelectedCandidatePairStats(); ok {
+		pi.RTTMs = st.CurrentRoundTripTime * 1000
+		pi.BytesSent, pi.BytesReceived = st.BytesSent, st.BytesReceived
+	}
+	for _, v := range pr.pc.GetStats() {
+		if s, ok := v.(webrtc.SCTPTransportStats); ok {
+			pi.CwndBytes = s.CongestionWindow
+			if pi.RTTMs == 0 {
+				pi.RTTMs = s.SmoothedRoundTripTime * 1000
+			}
+		}
+	}
+	return pi
 }
 
 // GuestAuthenticated links a file-API guest id to the peer it came from, so
@@ -443,6 +561,7 @@ func (h *Host) attach(pr *peer, dc *webrtc.DataChannel) {
 	dc.OnClose(func() { sess.Close(nil) })
 	h.mu.Lock()
 	pr.sess = sess
+	pr.connectedAt = time.Now()
 	h.mu.Unlock()
 	if sctp := pr.pc.SCTP(); sctp != nil {
 		sctp.Transport().ICETransport().OnSelectedCandidatePairChange(func(*webrtc.ICECandidatePair) {
@@ -469,21 +588,55 @@ func (h *Host) updateTransport(pr *peer) {
 		t = fileserver.TransportRelay
 	}
 	pr.transport.Store(t)
-	route := RouteOf(pair.Local.Typ.String(), pair.Remote.Typ.String(), pair.Remote.Address)
+	var public []string
+	if h.cfg.PublicIPs != nil {
+		public = h.cfg.PublicIPs()
+	}
+	route := ClassifyRoute(pair.Local.Typ.String(), pair.Remote.Typ.String(), pair.Remote.Address, public)
 	if old, _ := pr.route.Load().(string); old != route {
 		h.log.Info("guest path selected", "route", route, "local", pair.Local.Typ.String(), "remote", pair.Remote.Typ.String())
 	}
 	pr.route.Store(route)
 }
 
-// RouteOf classifies an ICE candidate pair for display: traffic stays on the
-// local network only if the remote address is a private one.
-func RouteOf(localType, remoteType, remoteAddr string) string {
+// IsTunnelInterface reports whether a network interface name looks like a
+// VPN or tunnel adapter (macOS/Linux utun/tun/tap/wg/ppp/ipsec, and the
+// usual Windows adapter names).
+func IsTunnelInterface(name string) bool {
+	n := strings.ToLower(name)
+	for _, p := range []string{"utun", "tun", "tap", "wg", "ppp", "ipsec", "gif", "stf", "zt", "tailscale"} {
+		if strings.HasPrefix(n, p) {
+			return true
+		}
+	}
+	for _, w := range []string{"vpn", "wireguard", "openvpn", "tap-windows", "wintun", "hamachi", "zerotier", "radmin", "outline", "hiddify", "v2ray", "nekoray", "sing-box", "clash"} {
+		if strings.Contains(n, w) {
+			return true
+		}
+	}
+	return false
+}
+
+// ClassifyRoute describes an ICE candidate pair for people:
+//   - "relay": through the TURN relay;
+//   - "local network": the remote address is a private one, so packets never
+//     leave the local network;
+//   - "router loopback": the remote address is our own public address, i.e.
+//     both devices are behind the same router and traffic is bounced off its
+//     public side (often slow on home routers);
+//   - "internet": a direct path between two different networks.
+func ClassifyRoute(localType, remoteType, remoteAddr string, ownPublicIPs []string) string {
 	if localType == "relay" || remoteType == "relay" {
 		return "relay"
 	}
-	if ip := net.ParseIP(remoteAddr); ip != nil && (ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLoopback()) {
+	ip := net.ParseIP(remoteAddr)
+	if ip != nil && (ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLoopback()) {
 		return "local network"
+	}
+	for _, own := range ownPublicIPs {
+		if own != "" && own == remoteAddr {
+			return "router loopback"
+		}
 	}
 	return "internet"
 }

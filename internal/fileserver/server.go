@@ -108,6 +108,19 @@ func routeOf(r *http.Request) string {
 	return "internet"
 }
 
+// clientAddr is the client's IP for direct connections ("" over the tunnel,
+// where the WebRTC path describes the endpoints instead).
+func clientAddr(r *http.Request) string {
+	if _, ok := r.Context().Value(routeKey).(func() string); ok {
+		return ""
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return ""
+	}
+	return host
+}
+
 func transportOf(r *http.Request) string {
 	if f, ok := r.Context().Value(transportKey).(func() string); ok {
 		return f()
@@ -346,7 +359,7 @@ func (s *Server) handleAuth(w http.ResponseWriter, r *http.Request) {
 		Name: cookieName, Value: tok, Path: "/api/", Expires: exp,
 		HttpOnly: true, Secure: r.TLS != nil, SameSite: http.SameSiteStrictMode,
 	})
-	s.tracker.TouchGuest(guest, transportOf(r), routeOf(r), clientLabel(r))
+	s.tracker.TouchGuest(guest, transportOf(r), routeOf(r), clientAddr(r), clientLabel(r))
 	if s.OnAuth != nil {
 		s.OnAuth(guest, peerOf(r))
 	}
@@ -378,7 +391,7 @@ func (s *Server) auth(h http.HandlerFunc, allowCookie bool) http.HandlerFunc {
 			writeErr(w, http.StatusUnauthorized, "access expired or revoked; reopen the link")
 			return
 		}
-		s.tracker.TouchGuest(claims.Guest, transportOf(r), routeOf(r), clientLabel(r))
+		s.tracker.TouchGuest(claims.Guest, transportOf(r), routeOf(r), clientAddr(r), clientLabel(r))
 		ctx := context.WithValue(r.Context(), guestKey, claims.Guest)
 		h(w, r.WithContext(ctx))
 	}

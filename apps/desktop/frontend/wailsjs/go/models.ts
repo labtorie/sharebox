@@ -133,6 +133,8 @@ export namespace host {
 	    expiresAt: any;
 	    previewUrl?: string;
 	    password: boolean;
+	    peers: rtc.PeerInfo[];
+	    publicIp?: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new Status(source);
@@ -156,6 +158,118 @@ export namespace host {
 	        this.expiresAt = this.convertValues(source["expiresAt"], null);
 	        this.previewUrl = source["previewUrl"];
 	        this.password = source["password"];
+	        this.peers = this.convertValues(source["peers"], rtc.PeerInfo);
+	        this.publicIp = source["publicIp"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+
+}
+
+export namespace rtc {
+	
+	export class Endpoint {
+	    type: string;
+	    address: string;
+	    port: number;
+	    protocol: string;
+	    related?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new Endpoint(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.type = source["type"];
+	        this.address = source["address"];
+	        this.port = source["port"];
+	        this.protocol = source["protocol"];
+	        this.related = source["related"];
+	    }
+	}
+	export class PathInfo {
+	    kind: string;
+	    route: string;
+	    local: Endpoint;
+	    remote: Endpoint;
+	    rttMs: number;
+	    bytesSent: number;
+	    bytesReceived: number;
+	    cwndBytes: number;
+	    // Go type: time
+	    since: any;
+	
+	    static createFrom(source: any = {}) {
+	        return new PathInfo(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.kind = source["kind"];
+	        this.route = source["route"];
+	        this.local = this.convertValues(source["local"], Endpoint);
+	        this.remote = this.convertValues(source["remote"], Endpoint);
+	        this.rttMs = source["rttMs"];
+	        this.bytesSent = source["bytesSent"];
+	        this.bytesReceived = source["bytesReceived"];
+	        this.cwndBytes = source["cwndBytes"];
+	        this.since = this.convertValues(source["since"], null);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class PeerInfo {
+	    id: string;
+	    transport: string;
+	    connected: boolean;
+	    guests: string[];
+	    path?: PathInfo;
+	
+	    static createFrom(source: any = {}) {
+	        return new PeerInfo(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.transport = source["transport"];
+	        this.connected = source["connected"];
+	        this.guests = source["guests"];
+	        this.path = this.convertValues(source["path"], PathInfo);
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -185,6 +299,7 @@ export namespace transfers {
 	    id: string;
 	    transport: string;
 	    route: string;
+	    address?: string;
 	    // Go type: time
 	    since: any;
 	    // Go type: time
@@ -200,6 +315,7 @@ export namespace transfers {
 	        this.id = source["id"];
 	        this.transport = source["transport"];
 	        this.route = source["route"];
+	        this.address = source["address"];
 	        this.since = this.convertValues(source["since"], null);
 	        this.lastSeen = this.convertValues(source["lastSeen"], null);
 	        this.label = source["label"];

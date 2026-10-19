@@ -240,3 +240,32 @@ var benchVariants = map[string]TransportTuning{
 	"ca16":       {SCTPReceiveBuffer: 8 << 20, CwndCAStep: 16 * 1228},
 	"ca32":       {SCTPReceiveBuffer: 8 << 20, CwndCAStep: 32 * 1228},
 }
+
+func TestClassifyRoute(t *testing.T) {
+	own := []string{"203.0.113.7"}
+	cases := []struct{ lt, rt, addr, want string }{
+		{"host", "host", "192.168.1.20", "local network"},
+		{"host", "prflx", "10.0.0.5", "local network"},
+		{"srflx", "srflx", "203.0.113.7", "router loopback"},
+		{"srflx", "srflx", "198.51.100.9", "internet"},
+		{"relay", "srflx", "198.51.100.9", "relay"},
+		{"host", "relay", "192.0.2.1", "relay"},
+	}
+	for _, c := range cases {
+		if got := ClassifyRoute(c.lt, c.rt, c.addr, own); got != c.want {
+			t.Errorf("%s/%s %s = %q, want %q", c.lt, c.rt, c.addr, got, c.want)
+		}
+	}
+}
+
+func TestIsTunnelInterface(t *testing.T) {
+	for name, want := range map[string]bool{
+		"en0": false, "eth0": false, "wlan0": false, "Wi-Fi": false, "Ethernet": false, "bridge100": false,
+		"utun9": true, "tun0": true, "wg0": true, "ppp0": true, "tailscale0": true, "zt7nnig26": true,
+		"Radmin VPN": true, "WireGuard Tunnel": true, "OpenVPN TAP-Windows6": true, "Hiddify Tunnel": true,
+	} {
+		if got := IsTunnelInterface(name); got != want {
+			t.Errorf("IsTunnelInterface(%q) = %v, want %v", name, got, want)
+		}
+	}
+}
