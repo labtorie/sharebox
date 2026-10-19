@@ -11,6 +11,8 @@ export function ClearErrors():Promise<void>;
 
 export function CopyLink():Promise<void>;
 
+export function DefaultServer():Promise<string>;
+
 export function GetSettings():Promise<config.Settings>;
 
 export function OpenPreview():Promise<void>;

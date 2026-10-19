@@ -29,12 +29,30 @@ type Settings struct {
 	ShowQR             bool                   `json:"showQr"`
 }
 
+// DefaultServerURL is the shared Sharebox server every host uses unless the
+// user picks another one in Settings. Set it here, or at build time without
+// editing code:
+//
+//	SHAREBOX_DEFAULT_SERVER=https://share.example.org scripts/build.sh
+//
+// which passes -ldflags "-X sharebox/internal/config.DefaultServerURL=…".
+var DefaultServerURL = ""
+
+// DefaultServer returns the server to use when none is configured. The
+// SHAREBOX_SERVER environment variable (development) takes precedence.
+func DefaultServer() string {
+	if v := os.Getenv("SHAREBOX_SERVER"); v != "" {
+		return v
+	}
+	return DefaultServerURL
+}
+
 // Defaults returns safe defaults (deletion disabled).
 func Defaults() Settings {
 	return Settings{
 		Perms: fileserver.DefaultPermissions(), MinFreeMB: 1024, MaxConcurrent: 8,
 		PortMapping: true, KeepRunningOnClose: true, Theme: "system", ShowQR: true,
-		ServerURL: os.Getenv("SHAREBOX_SERVER"),
+		ServerURL: DefaultServer(),
 	}
 }
 
@@ -99,6 +117,9 @@ func (s *Store) LoadSettings() Settings {
 	}
 	if st.MaxConcurrent <= 0 {
 		st.MaxConcurrent = 8
+	}
+	if st.ServerURL == "" {
+		st.ServerURL = DefaultServer()
 	}
 	return st
 }

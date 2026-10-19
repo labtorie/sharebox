@@ -471,6 +471,10 @@ function TransferRow({ t }: { t: Transfer }) {
 
 function SettingsDialog({ open, onClose, settings, onSave, running }: { open: boolean; onClose: () => void; settings: Settings; onSave: (s: Settings) => Promise<void>; running: boolean }) {
   const [s, setS] = useState(settings);
+  const [def, setDef] = useState("");
+  useEffect(() => {
+    Go.DefaultServer().then(setDef);
+  }, []);
   useEffect(() => setS(settings), [settings, open]);
   const num = (k: keyof Settings) => (e: React.ChangeEvent<HTMLInputElement>) => setS({ ...s, [k]: Math.max(0, Number(e.target.value) || 0) });
   return (
@@ -486,8 +490,19 @@ function SettingsDialog({ open, onClose, settings, onSave, running }: { open: bo
       }
     >
       <div className="max-h-[60vh] space-y-4 overflow-y-auto pr-1">
-        <Field label="Sharebox server" hint={running ? "Takes effect next time you start sharing." : "The coordination server that creates links and relays connections."}>
-          <TextInput value={s.serverUrl} onChange={(e) => setS({ ...s, serverUrl: e.target.value })} placeholder="https://share.example.org" spellCheck={false} />
+        <Field
+          label="Sharebox server"
+          hint={
+            (def && s.serverUrl === def ? "Built-in shared server — no change needed. " : def ? "Only change this if you run your own server. " : "The coordination server that creates links and relays connections. ") +
+            (running ? "Takes effect next time you start sharing." : "")
+          }
+        >
+          <div className="flex gap-2">
+            <TextInput value={s.serverUrl} onChange={(e) => setS({ ...s, serverUrl: e.target.value })} placeholder={def || "https://share.example.org"} spellCheck={false} />
+            {def && s.serverUrl !== def && (
+              <Button variant="ghost" onClick={() => setS({ ...s, serverUrl: def })} title={def}>Use default</Button>
+            )}
+          </div>
         </Field>
         <Field label="Appearance">
           <select value={s.theme} onChange={(e) => setS({ ...s, theme: e.target.value as Settings["theme"] })} className="w-full rounded-xl bg-zinc-100 px-3 py-2.5 text-sm dark:bg-zinc-800">

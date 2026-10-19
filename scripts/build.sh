@@ -13,6 +13,15 @@ export COPYFILE_DISABLE=1 # no macOS ._ files in tarballs
 cd "$(dirname "$0")/.."
 VERSION="${VERSION:-1.0.0}"
 LDFLAGS="-s -w"
+# Built-in shared server for the desktop app and CLI (hosts then need no
+# setup). Without it, the value of DefaultServerURL in internal/config is used.
+if [ -n "${SHAREBOX_DEFAULT_SERVER:-}" ]; then
+  SHAREBOX_DEFAULT_SERVER="${SHAREBOX_DEFAULT_SERVER%/}"
+  [[ "$SHAREBOX_DEFAULT_SERVER" =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?$ ]] ||
+    { echo "SHAREBOX_DEFAULT_SERVER must look like https://host (got '$SHAREBOX_DEFAULT_SERVER')" >&2; exit 1; }
+  LDFLAGS="$LDFLAGS -X sharebox/internal/config.DefaultServerURL=$SHAREBOX_DEFAULT_SERVER"
+  echo "==> built-in server: $SHAREBOX_DEFAULT_SERVER"
+fi
 WAILS="${WAILS:-$(command -v wails || echo "$HOME/go/bin/wails")}"
 TARGETS=("$@")
 [ ${#TARGETS[@]} -eq 0 ] && TARGETS=(web server server-pkg cli desktop-mac desktop-win)

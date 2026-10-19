@@ -116,6 +116,9 @@ func (a *App) GetSettings() config.Settings {
 // applied immediately to a running share.
 func (a *App) SaveSettings(s config.Settings) error {
 	s.ServerURL = strings.TrimRight(strings.TrimSpace(s.ServerURL), "/")
+	if s.ServerURL == "" {
+		s.ServerURL = config.DefaultServer() // clearing the field restores the default
+	}
 	if s.ServerURL != "" {
 		u, err := url.Parse(s.ServerURL)
 		if err != nil || u.Host == "" || (u.Scheme != "https" && !(u.Scheme == "http" && isLocal(u.Hostname()))) {
@@ -136,6 +139,9 @@ func (a *App) SaveSettings(s config.Settings) error {
 }
 
 func isLocal(h string) bool { return h == "localhost" || h == "127.0.0.1" || h == "::1" }
+
+// DefaultServer is the built-in shared server ("" if none was built in).
+func (a *App) DefaultServer() string { return config.DefaultServer() }
 
 // ChooseFolder opens the native folder picker and saves the choice.
 func (a *App) ChooseFolder() (string, error) {

@@ -18,6 +18,10 @@ export function CopyLink() {
   return window['go']['main']['App']['CopyLink']();
 }
 
+export function DefaultServer() {
+  return window['go']['main']['App']['DefaultServer']();
+}
+
 export function GetSettings() {
   return window['go']['main']['App']['GetSettings']();
 }

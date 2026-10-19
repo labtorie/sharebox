@@ -21,6 +21,7 @@
 | `scripts/build.sh desktop-mac` | `Sharebox-<v>-macos-universal.dmg` (Apple Silicon + Intel) |
 | `scripts/build.sh desktop-win` | `Sharebox-<v>-windows-x64.exe` (+ `-setup.exe` with makensis) |
 | `VERSION=1.2.3 scripts/build.sh` | Set the version in file names |
+| `SHAREBOX_DEFAULT_SERVER=https://share.example.org scripts/build.sh` | Build the shared server address into the desktop app and CLI, so hosts need no setup (it can still be changed in Settings). Alternatively set `DefaultServerURL` in `internal/config/config.go`. |
 
 The guest web app is compiled into `internal/guestweb/dist` and embedded in
 both the server and the host, so build `web` first whenever it changes.
