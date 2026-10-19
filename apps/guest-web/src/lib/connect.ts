@@ -14,7 +14,7 @@ import { RTCTransport, type Kind, type Transport } from "./transport";
 
 export type ConnState =
   | { phase: "connecting"; step: string }
-  | { phase: "connected"; kind: Kind }
+  | { phase: "connected"; kind: Kind; route?: string }
   | { phase: "reconnecting"; reason: string }
   | { phase: "host-offline" }
   | { phase: "failed"; title: string; detail: string; retryable: boolean };
@@ -195,7 +195,7 @@ export class Connector {
         try {
           const t = await this.connectRTC();
           this.current = t;
-          this.set({ phase: "connected", kind: t.kind });
+          this.set({ phase: "connected", kind: t.kind, route: t.route });
           const ws = this.waiters;
           this.waiters = [];
           ws.forEach((w) => w(t));
@@ -253,9 +253,10 @@ export class Connector {
         if (done) return;
         done = true;
         clearTimeout(timer);
-        const kind = await selectedKind(pc);
+        const { kind, route } = await selectedPath(pc);
         const client = attachDataChannel(dc);
         const t = new RTCTransport(kind, client, pc);
+        t.route = route;
         client.onclose = () => this.onLost(t);
         resolve(t);
       };
@@ -306,7 +307,8 @@ export class Connector {
   }
 }
 
-async function selectedKind(pc: RTCPeerConnection): Promise<Kind> {
+/** Which ICE path was chosen: transport kind plus a human description. */
+async function selectedPath(pc: RTCPeerConnection): Promise<{ kind: Kind; route: string }> {
   try {
     const stats = await pc.getStats();
     let pairId = "";
@@ -320,10 +322,16 @@ async function selectedKind(pc: RTCPeerConnection): Promise<Kind> {
     if (pair) {
       const local = stats.get(pair.localCandidateId);
       const remote = stats.get(pair.remoteCandidateId);
-      if (local?.candidateType === "relay" || remote?.candidateType === "relay") return "relay";
+      if (local?.candidateType === "relay" || remote?.candidateType === "relay") return { kind: "relay", route: "relay" };
+      const addr: string = remote?.address ?? remote?.ip ?? "";
+      return { kind: "p2p", route: isPrivateIP(addr) ? "local network" : "internet" };
     }
   } catch {
     /* ignore */
   }
-  return "p2p";
+  return { kind: "p2p", route: "" };
+}
+
+function isPrivateIP(a: string): boolean {
+  return /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|169\.254\.|127\.|fe80:|fc|fd)/i.test(a);
 }

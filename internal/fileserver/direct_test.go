@@ -62,7 +62,9 @@ func TestLargeFileStreaming(t *testing.T) {
 	defer res.Body.Close()
 	var peak uint64
 	done := make(chan struct{})
+	sampled := make(chan struct{})
 	go func() {
+		defer close(sampled)
 		var ms runtime.MemStats
 		for {
 			select {
@@ -94,6 +96,7 @@ func TestLargeFileStreaming(t *testing.T) {
 		}
 	}
 	close(done)
+	<-sampled // peak is only read after the sampler has stopped
 	if n != size || string(last) != "END!" {
 		t.Fatalf("got %d bytes, tail %q", n, last)
 	}

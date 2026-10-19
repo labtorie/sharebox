@@ -86,6 +86,7 @@ export class DirectTransport implements Transport {
 /** Tunnel transport over a WebRTC DataChannel (peer-to-peer or relayed). */
 export class RTCTransport implements Transport {
   native = false;
+  route = "";
   constructor(
     readonly kind: Kind,
     private client: TunnelClient,

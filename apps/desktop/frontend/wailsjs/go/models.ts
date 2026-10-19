@@ -184,6 +184,7 @@ export namespace transfers {
 	export class Guest {
 	    id: string;
 	    transport: string;
+	    route: string;
 	    // Go type: time
 	    since: any;
 	    // Go type: time
@@ -198,6 +199,7 @@ export namespace transfers {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.id = source["id"];
 	        this.transport = source["transport"];
+	        this.route = source["route"];
 	        this.since = this.convertValues(source["since"], null);
 	        this.lastSeen = this.convertValues(source["lastSeen"], null);
 	        this.label = source["label"];

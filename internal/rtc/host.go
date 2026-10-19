@@ -65,11 +65,61 @@ type peer struct {
 	pc        *webrtc.PeerConnection
 	sess      *tunnel.Session
 	transport atomic.Value // string
+	route     atomic.Value // string
 	pending   []webrtc.ICECandidateInit
 	haveRD    bool
 	created   time.Time
 	guests    map[string]bool
 }
+
+// TransportTuning holds the WebRTC transport knobs that affect throughput.
+// They are kept in one place so benchmarks measure exactly what the host
+// uses.
+type TransportTuning struct {
+	SCTPReceiveBuffer uint32 // bytes
+	ZeroChecksum      bool   // skip SCTP CRC32c (DTLS already protects integrity)
+	MinCwnd           uint32 // 0 = library default
+	FastRtxWnd        uint32 // 0 = library default
+	CwndCAStep        uint32 // 0 = library default
+	RTOMax            time.Duration
+}
+
+// Tuning is the configuration used by the host.
+//
+// pion's SCTP congestion control behaves like TCP Reno: every random loss
+// (common on Wi-Fi) halves the window and it then grows back by about one
+// packet per round trip, which capped downloads at ~4 MB/s on a home
+// network with 0.5% loss. A larger additive step (8 packets) roughly
+// doubles throughput under random loss, while the window still halves on
+// real congestion, so capped links are not flooded. Raising the minimum
+// window instead was measured to collapse throughput on capped links.
+// See TestThroughputUnderNetworkConditions.
+var Tuning = TransportTuning{SCTPReceiveBuffer: 8 << 20, CwndCAStep: 8 * 1228}
+
+func (t TransportTuning) settingEngine() webrtc.SettingEngine {
+	se := webrtc.SettingEngine{}
+	se.SetICETimeouts(6*time.Second, 20*time.Second, 2*time.Second)
+	se.SetSCTPMaxReceiveBufferSize(t.SCTPReceiveBuffer)
+	if t.ZeroChecksum {
+		se.EnableSCTPZeroChecksum(true)
+	}
+	if t.MinCwnd > 0 {
+		se.SetSCTPMinCwnd(t.MinCwnd)
+	}
+	if t.FastRtxWnd > 0 {
+		se.SetSCTPFastRtxWnd(t.FastRtxWnd)
+	}
+	if t.CwndCAStep > 0 {
+		se.SetSCTPCwndCAStep(t.CwndCAStep)
+	}
+	if t.RTOMax > 0 {
+		se.SetSCTPRTOMax(t.RTOMax)
+	}
+	return se
+}
+
+// SettingEngine returns a setting engine with the given tuning (benchmarks).
+func (t TransportTuning) SettingEngine() webrtc.SettingEngine { return t.settingEngine() }
 
 // PeerInfo describes a connected peer.
 type PeerInfo struct {
@@ -83,15 +133,16 @@ func New(cfg Config) (*Host, error) {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
-	se := webrtc.SettingEngine{}
-	se.SetICETimeouts(6*time.Second, 20*time.Second, 2*time.Second)
-	se.SetSCTPMaxReceiveBufferSize(8 << 20)
+	se := Tuning.settingEngine()
 	if cfg.AllowLoopback {
 		se.SetIncludeLoopbackCandidate(true)
 	}
-	// Do not reveal local addresses through mDNS names to guests; plain host
-	// candidates are needed for LAN connections.
-	se.SetICEMulticastDNSMode(ice.MulticastDNSModeDisabled)
+	// Browsers (Chrome, Safari, Firefox) hide guests' local addresses behind
+	// random "<uuid>.local" names. Resolve them with mDNS so two devices on
+	// the same network connect directly instead of hair-pinning through the
+	// router's public address (slow on many routers). We only query: our own
+	// host candidates stay plain IPs so guests can always reach us.
+	se.SetICEMulticastDNSMode(ice.MulticastDNSModeQueryOnly)
 	h := &Host{cfg: cfg, log: cfg.Logger, peers: map[string]*peer{}}
 	if cfg.UDPConn != nil {
 		h.mux = webrtc.NewICEUDPMux(nil, cfg.UDPConn)
@@ -254,6 +305,7 @@ func (h *Host) handleOffer(id string, d *p.SignalPayload) {
 	}
 	pr := &peer{id: id, pc: pc, created: time.Now(), guests: map[string]bool{}}
 	pr.transport.Store("")
+	pr.route.Store("")
 	h.peers[id] = pr
 	h.mu.Unlock()
 
@@ -363,9 +415,10 @@ func (h *Host) attach(pr *peer, dc *webrtc.DataChannel) {
 		return t
 	}
 	sess := tunnel.New(dcLink{dc}, tunnel.Options{
-		Handler:     h.cfg.Handler,
-		BaseContext: fileserver.WithTransport(context.Background(), kind, tag),
-		Logger:      h.log,
+		Handler: h.cfg.Handler,
+		BaseContext: fileserver.WithRoute(fileserver.WithTransport(context.Background(), kind, tag),
+			func() string { r, _ := pr.route.Load().(string); return r }),
+		Logger: h.log,
 		OnClose: func(error) {
 			h.mu.Lock()
 			if h.peers[pr.id] == pr {
@@ -416,4 +469,21 @@ func (h *Host) updateTransport(pr *peer) {
 		t = fileserver.TransportRelay
 	}
 	pr.transport.Store(t)
+	route := RouteOf(pair.Local.Typ.String(), pair.Remote.Typ.String(), pair.Remote.Address)
+	if old, _ := pr.route.Load().(string); old != route {
+		h.log.Info("guest path selected", "route", route, "local", pair.Local.Typ.String(), "remote", pair.Remote.Typ.String())
+	}
+	pr.route.Store(route)
+}
+
+// RouteOf classifies an ICE candidate pair for display: traffic stays on the
+// local network only if the remote address is a private one.
+func RouteOf(localType, remoteType, remoteAddr string) string {
+	if localType == "relay" || remoteType == "relay" {
+		return "relay"
+	}
+	if ip := net.ParseIP(remoteAddr); ip != nil && (ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLoopback()) {
+		return "local network"
+	}
+	return "internet"
 }

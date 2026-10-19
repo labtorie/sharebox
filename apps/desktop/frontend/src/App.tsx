@@ -269,7 +269,10 @@ export default function App() {
                   {guests.map((g) => (
                     <li key={g.id} className="flex items-center gap-3 py-2 text-sm">
                       <TransportBadge t={g.transport} />
-                      <span className="flex-1 truncate">{g.label || "Guest"}</span>
+                      <span className="min-w-0 flex-1 truncate">
+                        {g.label || "Guest"}
+                        {g.route && g.route !== "relay" && <span className="ml-1.5 text-xs text-zinc-500">· {g.route}</span>}
+                      </span>
                       <span className="text-xs text-zinc-500">since {new Date(g.since).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
                       <button onClick={() => Go.RevokeGuest(g.id)} className="rounded-lg p-1 text-zinc-400 hover:bg-zinc-100 hover:text-red-600 dark:hover:bg-zinc-800" title="Disconnect this guest">
                         <X className="h-4 w-4" />

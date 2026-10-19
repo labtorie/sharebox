@@ -194,7 +194,9 @@ function ConnBadge({ conn, kind }: { conn: ConnState; kind: Kind | null }) {
     local: ["Local preview", <Laptop className="h-3.5 w-3.5" />, "Host preview on this computer"],
   };
   const [text, icon, title] = m[kind];
-  return <Pill tone="green" icon={icon} text={text} title={title} />;
+  const route = conn.route && kind !== "relay" ? conn.route : "";
+  const short = route === "local network" ? "local" : route;
+  return <Pill tone="green" icon={icon} text={short ? `${text} · ${short}` : text} title={route ? `${title} (${route})` : title} />;
 }
 
 function Pill({ tone, icon, text, title }: { tone: "green" | "amber" | "red"; icon: React.ReactNode; text: string; title?: string }) {

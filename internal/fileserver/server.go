@@ -74,6 +74,7 @@ const (
 	transportKey ctxKey = iota
 	peerKey
 	guestKey
+	routeKey
 )
 
 // WithTransport tags a request context with the transport it arrived on and
@@ -81,6 +82,30 @@ const (
 func WithTransport(ctx context.Context, kind func() string, peer string) context.Context {
 	ctx = context.WithValue(ctx, transportKey, kind)
 	return context.WithValue(ctx, peerKey, peer)
+}
+
+// WithRoute tags a request context with a description of the network path
+// ("local network", "internet", "relay").
+func WithRoute(ctx context.Context, route func() string) context.Context {
+	return context.WithValue(ctx, routeKey, route)
+}
+
+// routeOf describes the network path a request took.
+func routeOf(r *http.Request) string {
+	if f, ok := r.Context().Value(routeKey).(func() string); ok {
+		return f()
+	}
+	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		if ip := net.ParseIP(host); ip != nil {
+			if ip.IsLoopback() {
+				return "this computer"
+			}
+			if ip.IsPrivate() || ip.IsLinkLocalUnicast() {
+				return "local network"
+			}
+		}
+	}
+	return "internet"
 }
 
 func transportOf(r *http.Request) string {
@@ -321,7 +346,7 @@ func (s *Server) handleAuth(w http.ResponseWriter, r *http.Request) {
 		Name: cookieName, Value: tok, Path: "/api/", Expires: exp,
 		HttpOnly: true, Secure: r.TLS != nil, SameSite: http.SameSiteStrictMode,
 	})
-	s.tracker.TouchGuest(guest, transportOf(r), clientLabel(r))
+	s.tracker.TouchGuest(guest, transportOf(r), routeOf(r), clientLabel(r))
 	if s.OnAuth != nil {
 		s.OnAuth(guest, peerOf(r))
 	}
@@ -353,7 +378,7 @@ func (s *Server) auth(h http.HandlerFunc, allowCookie bool) http.HandlerFunc {
 			writeErr(w, http.StatusUnauthorized, "access expired or revoked; reopen the link")
 			return
 		}
-		s.tracker.TouchGuest(claims.Guest, transportOf(r), clientLabel(r))
+		s.tracker.TouchGuest(claims.Guest, transportOf(r), routeOf(r), clientLabel(r))
 		ctx := context.WithValue(r.Context(), guestKey, claims.Guest)
 		h(w, r.WithContext(ctx))
 	}

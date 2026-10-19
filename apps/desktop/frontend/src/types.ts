@@ -4,7 +4,7 @@ export interface Transfer {
   id: string; guest: string; kind: "download" | "upload" | "zip"; name: string; total: number; bytes: number;
   speed: number; status: "active" | "done" | "failed" | "cancelled"; error?: string; transport: string; started: string; ended?: string;
 }
-export interface Guest { id: string; transport: string; since: string; lastSeen: string; label: string }
+export interface Guest { id: string; transport: string; route?: string; since: string; lastSeen: string; label: string }
 export interface Status {
   state: "idle" | "starting" | "sharing" | "stopping";
   link?: string; linkReady: boolean; headline: string;

@@ -58,6 +58,7 @@ type Handle struct {
 type Guest struct {
 	ID        string    `json:"id"`
 	Transport string    `json:"transport"` // direct | p2p | relay
+	Route     string    `json:"route"`     // local network | internet | relay
 	Since     time.Time `json:"since"`
 	LastSeen  time.Time `json:"lastSeen"`
 	Label     string    `json:"label"` // coarse client description (browser/OS)
@@ -186,7 +187,7 @@ func (tr *Handle) copy() Transfer {
 func (tr *Handle) ID() string { return tr.info.ID }
 
 // TouchGuest marks a guest as active.
-func (t *Tracker) TouchGuest(id, transport, label string) {
+func (t *Tracker) TouchGuest(id, transport, route, label string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	now := time.Now()
@@ -197,6 +198,7 @@ func (t *Tracker) TouchGuest(id, transport, label string) {
 		defer func() { go t.changed() }()
 	}
 	g.Transport = transport
+	g.Route = route
 	g.LastSeen = now
 }
 
