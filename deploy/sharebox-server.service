@@ -1,0 +1,25 @@
+# systemd unit for a bare-metal install:
+#   install -m755 sharebox-server /usr/local/bin/
+#   install -m600 .env /etc/sharebox/env   (see deploy/.env.example)
+#   systemctl enable --now sharebox-server
+[Unit]
+Description=Sharebox coordination server (signalling, guest web app, TURN relay)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+EnvironmentFile=/etc/sharebox/env
+Environment=SHAREBOX_DATA_DIR=/var/lib/sharebox
+ExecStart=/usr/local/bin/sharebox-server
+Restart=always
+DynamicUser=yes
+StateDirectory=sharebox
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

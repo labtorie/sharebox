@@ -1,0 +1,17 @@
+# Production deployment on a VPS with a public IPv4 address.
+# 1. Point DNS for share.example.org at the server (A record).
+# 2. Copy .env.example to .env and fill it in.
+# 3. docker compose up -d
+# Host networking is used so the TURN relay sees real client addresses and
+# can allocate relay ports without NAT in between.
+services:
+  sharebox:
+    build: { context: .., dockerfile: deploy/Dockerfile }
+    image: sharebox-server
+    network_mode: host
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - sharebox-data:/data
+volumes:
+  sharebox-data:

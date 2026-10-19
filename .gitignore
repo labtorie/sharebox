@@ -1,0 +1,13 @@
+node_modules/
+dist/
+bin/
+.dev-config/
+apps/desktop/build/bin/
+apps/desktop/build/windows/installer/tmp/
+apps/desktop/frontend/dist/
+apps/guest-web/test-results/
+apps/guest-web/playwright-report/
+sharebox-data/
+.DS_Store
+*.tmp.mjs
+!internal/guestweb/dist/
