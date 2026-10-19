@@ -68,7 +68,15 @@ function Share({ sessionId, accessKey, theme, setTheme }: { sessionId: string; a
   }, [sessionId, accessKey]);
 
   const api = useMemo(() => new Api(getTransport, accessKey), [getTransport, accessKey]);
-  const transfers = useMemo(() => new Transfers(api, getTransport), [api, getTransport]);
+  const transfers = useMemo(
+    () =>
+      new Transfers(
+        api,
+        getTransport,
+        connector ? { pool: () => connector.pool(), parallel: () => connector.maxParallel, primary: () => connector.transport() } : undefined,
+      ),
+    [api, getTransport, connector],
+  );
   const jobs = useSyncExternalStore(
     useCallback((cb) => transfers.subscribe(cb), [transfers]),
     useMemo(() => {

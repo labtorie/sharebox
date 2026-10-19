@@ -33,8 +33,14 @@ function wsURL(): string {
 
 export class Connector {
   private ws: WebSocket | null = null;
-  private pc: RTCPeerConnection | null = null;
+  // Peer connections by connection number; 0 is the primary one.
+  private pcs = new Map<number, { pc: RTCPeerConnection; pending: RTCIceCandidateInit[] }>();
   private current: RTCTransport | null = null;
+  // Extra connections for parallel transfers (each has its own congestion
+  // control, which multiplies throughput on lossy links).
+  private extras = new Map<number, RTCTransport>();
+  private opening = new Set<number>();
+  private parallel = 1;
   private ice: P.ICEServer[] = [];
   private online = false;
   private stopped = false;
@@ -43,7 +49,6 @@ export class Connector {
   private waiters: ((t: Transport) => void)[] = [];
   private negotiating = false;
   private wsBackoff = 1000;
-  private pendingCandidates: RTCIceCandidateInit[] = [];
   state: ConnState = { phase: "connecting", step: "Contacting the Sharebox server" };
 
   constructor(
@@ -75,6 +80,8 @@ export class Connector {
     this.stopped = true;
     this.ws?.close();
     this.current?.close();
+    this.extras.forEach((t) => t.close());
+    this.extras.clear();
   }
 
   retry() {
@@ -89,6 +96,39 @@ export class Connector {
   transport(): Promise<Transport> {
     if (this.current && !this.current.closed()) return Promise.resolve(this.current);
     return new Promise((res) => this.waiters.push(res));
+  }
+
+  /**
+   * All live connections, primary first. Transfers spread pieces over them.
+   * Missing extra connections are (re)opened in the background.
+   */
+  /** Connections the host allows (1 for hosts without parallel support). */
+  get maxParallel() {
+    return this.parallel;
+  }
+
+  pool(): Transport[] {
+    this.ensurePool();
+    const out: Transport[] = [];
+    if (this.current && !this.current.closed()) out.push(this.current);
+    for (const t of this.extras.values()) if (!t.closed()) out.push(t);
+    return out;
+  }
+
+  private ensurePool() {
+    if (this.parallel <= 1 || !this.current || this.current.closed() || this.stopped || this.failedHard) return;
+    if (this.ws?.readyState !== WebSocket.OPEN) return;
+    for (let i = 1; i < this.parallel; i++) {
+      const t = this.extras.get(i);
+      if ((t && !t.closed()) || this.opening.has(i)) continue;
+      this.opening.add(i);
+      this.connectRTC(i)
+        .then((t) => this.extras.set(i, t))
+        .catch(() => {
+          /* best effort: transfers fall back to fewer connections */
+        })
+        .finally(() => this.opening.delete(i));
+    }
   }
 
   private async openWS() {
@@ -193,12 +233,13 @@ export class Connector {
         if (this.stopped || this.failedHard) return;
         this.set({ phase: "connecting", step: this.attempt > 1 ? "Retrying the connection to the host" : "Establishing a secure peer-to-peer connection" });
         try {
-          const t = await this.connectRTC();
+          const t = await this.connectRTC(0);
           this.current = t;
           this.set({ phase: "connected", kind: t.kind, route: t.route });
           const ws = this.waiters;
           this.waiters = [];
           ws.forEach((w) => w(t));
+          this.ensurePool();
           return;
         } catch (e) {
           lastErr = (e as Error).message;
@@ -220,17 +261,16 @@ export class Connector {
     }
   }
 
-  private connectRTC(): Promise<RTCTransport> {
+  private connectRTC(conn: number): Promise<RTCTransport> {
     return new Promise(async (resolve, reject) => {
-      this.pc?.close();
+      this.pcs.get(conn)?.pc.close();
       // ?transport=relay forces the TURN relay (diagnostics and testing).
       const relayOnly = new URLSearchParams(location.search).get("transport") === "relay";
       const pc = new RTCPeerConnection({
         iceServers: this.ice.map((s) => ({ urls: s.urls, username: s.username, credential: s.credential })),
         iceTransportPolicy: relayOnly ? "relay" : "all",
       });
-      this.pc = pc;
-      this.pendingCandidates = [];
+      this.pcs.set(conn, { pc, pending: [] });
       const dc = pc.createDataChannel(P.TunnelLabel, { ordered: true });
       let done = false;
       const timer = setTimeout(() => fail(new Error("timed out")), 25000);
@@ -244,7 +284,7 @@ export class Connector {
       pc.onicecandidate = (ev) => {
         if (!ev.candidate) return;
         const c = ev.candidate.toJSON();
-        this.send({ t: "signal", data: { kind: "candidate", candidate: c.candidate, sdpMid: c.sdpMid ?? "", sdpMLineIndex: c.sdpMLineIndex ?? 0 } });
+        this.send({ t: "signal", data: { kind: "candidate", candidate: c.candidate, sdpMid: c.sdpMid ?? "", sdpMLineIndex: c.sdpMLineIndex ?? 0, conn: conn || undefined } });
       };
       pc.onconnectionstatechange = () => {
         if (pc.connectionState === "failed") fail(new Error("connection failed"));
@@ -257,13 +297,13 @@ export class Connector {
         const client = attachDataChannel(dc);
         const t = new RTCTransport(kind, client, pc);
         t.route = route;
-        client.onclose = () => this.onLost(t);
+        client.onclose = () => (conn === 0 ? this.onLost(t) : this.extras.delete(conn));
         resolve(t);
       };
       try {
         const offer = await pc.createOffer();
         await pc.setLocalDescription(offer);
-        this.send({ t: "signal", data: { kind: "offer", sdp: offer.sdp, policy: relayOnly ? "relay" : undefined } });
+        this.send({ t: "signal", data: { kind: "offer", sdp: offer.sdp, policy: relayOnly ? "relay" : undefined, conn: conn || undefined } });
       } catch (e) {
         fail(e as Error);
       }
@@ -271,25 +311,31 @@ export class Connector {
   }
 
   private async onSignal(d: P.SignalPayload) {
-    const pc = this.pc;
-    if (!pc) return;
+    const conn = d.conn ?? 0;
+    const entry = this.pcs.get(conn);
+    if (!entry) return;
+    const pc = entry.pc;
     if (d.kind === "answer" && d.sdp) {
       // Verify that the answer comes from a host that knows the access key,
       // so a tampering signalling server cannot insert itself (MITM).
       const want = await P.fingerprintMAC(this.key, P.sdpFingerprint(d.sdp));
       if (!d.fpmac || !P.constantTimeEqual(d.fpmac, want)) {
-        this.failedHard = true;
         pc.close();
+        if (conn !== 0) return; // an extra connection just isn't used
+        this.failedHard = true;
         this.set({ phase: "failed", title: "Host identity could not be verified", detail: "The connection was refused for your safety. The link may be outdated, or something is interfering with the connection.", retryable: true });
         return;
       }
       if (pc.signalingState !== "have-local-offer") return;
+      // Only hosts that support parallel connections advertise them; older
+      // hosts would treat a second offer as a renegotiation.
+      if (conn === 0) this.parallel = Math.max(1, Math.min(d.parallel ?? 1, 8));
       await pc.setRemoteDescription({ type: "answer", sdp: d.sdp });
-      for (const c of this.pendingCandidates) await pc.addIceCandidate(c).catch(() => {});
-      this.pendingCandidates = [];
+      for (const c of entry.pending) await pc.addIceCandidate(c).catch(() => {});
+      entry.pending = [];
     } else if (d.kind === "candidate" && d.candidate) {
       const c = { candidate: d.candidate, sdpMid: d.sdpMid || "0", sdpMLineIndex: d.sdpMLineIndex ?? 0 };
-      if (!pc.remoteDescription) this.pendingCandidates.push(c);
+      if (!pc.remoteDescription) entry.pending.push(c);
       else await pc.addIceCandidate(c).catch(() => {});
     }
   }
@@ -297,7 +343,7 @@ export class Connector {
   private onLost(t: RTCTransport) {
     if (this.current !== t || this.stopped || this.failedHard) return;
     this.current = null;
-    this.pc?.close();
+    this.pcs.get(0)?.pc.close();
     this.set({ phase: "reconnecting", reason: "The connection to the host was interrupted" });
     if (this.online && this.ws?.readyState === WebSocket.OPEN) {
       setTimeout(() => this.negotiate(), 500);

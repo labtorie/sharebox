@@ -125,15 +125,25 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 	var tr *transfers.Handle
+	// Parallel downloads fetch Range pieces over several connections; the
+	// client tags them so they show up as one transfer.
+	group := ""
+	if g := r.Header.Get("X-Sharebox-Transfer"); g != "" && len(g) <= 64 {
+		group = guestOf(r) + "/" + g
+	}
 	if r.Method == http.MethodGet {
 		total := fi.Size()
-		if rg := r.Header.Get("Range"); rg != "" {
+		if rg := r.Header.Get("Range"); rg != "" && group == "" {
 			total = -1 // ServeContent decides; progress shown as bytes only
 			if start, end, ok := parseSingleRange(rg, fi.Size()); ok {
 				total = end - start
 			}
 		}
-		tr = s.tracker.Begin(guestOf(r), transfers.Download, name, total, transportOf(r), cancel)
+		if group != "" {
+			tr = s.tracker.Join(group, guestOf(r), transfers.Download, name, total, transportOf(r), cancel)
+		} else {
+			tr = s.tracker.Begin(guestOf(r), transfers.Download, name, total, transportOf(r), cancel)
+		}
 	}
 	cw := &countingWriter{ResponseWriter: w, s: s, tr: tr, ctx: ctx}
 	http.ServeContent(cw, r.WithContext(ctx), name, fi.ModTime(), f)
@@ -144,7 +154,11 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 		} else if cw.status >= 400 {
 			err = fmt.Errorf("HTTP %d", cw.status)
 		}
-		s.tracker.End(tr, err)
+		if group != "" {
+			s.tracker.Leave(group, err)
+		} else {
+			s.tracker.End(tr, err)
+		}
 	}
 }
 

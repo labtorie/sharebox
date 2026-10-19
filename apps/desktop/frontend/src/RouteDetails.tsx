@@ -8,8 +8,23 @@ import type { Endpoint, Guest, PeerInfo, Status } from "./types";
 import { cx } from "./ui";
 import { formatBytes, formatSpeed } from "./format";
 
-export function peerFor(status: Status, guestId: string): PeerInfo | undefined {
-  return (status.peers ?? []).find((p) => (p.guests ?? []).includes(guestId));
+/** The guest's connections: the primary one first, then parallel ones. */
+export function peerFor(status: Status, guestId: string): PeerInfo[] {
+  const all = status.peers ?? [];
+  const main = all.find((p) => (p.guests ?? []).includes(guestId));
+  if (!main) return [];
+  return all.filter((p) => p.group === main.group && p.connected).sort((a, b) => a.conn - b.conn);
+}
+
+/** Sums byte counters over a guest's parallel connections. */
+function totals(peers: PeerInfo[]) {
+  let sent = 0;
+  let recv = 0;
+  for (const p of peers) {
+    sent += p.path?.bytesSent ?? 0;
+    recv += p.path?.bytesReceived ?? 0;
+  }
+  return { sent, recv };
 }
 
 type Tone = "green" | "blue" | "amber";
@@ -98,11 +113,9 @@ function fmtDuration(since?: string) {
 }
 
 /** Live send/receive rates from successive byte counters. */
-function useRates(peer?: PeerInfo) {
+function useRates(sent: number, recv: number) {
   const prev = useRef<{ sent: number; recv: number; t: number } | null>(null);
   const [rates, setRates] = useState({ out: 0, in: 0 });
-  const sent = peer?.path?.bytesSent ?? 0;
-  const recv = peer?.path?.bytesReceived ?? 0;
   useEffect(() => {
     const now = Date.now();
     const p = prev.current;
@@ -139,8 +152,9 @@ const routeShort: Record<string, string> = {
   relay: "relay",
 };
 
-export function GuestRow({ g, peer }: { g: Guest; peer?: PeerInfo }) {
+export function GuestRow({ g, peers }: { g: Guest; peers: PeerInfo[] }) {
   const [open, setOpen] = useState(false);
+  const peer = peers[0];
   const [label, cls] = badge[g.transport] ?? [g.transport, "bg-zinc-100"];
   const route = peer?.path?.route ?? g.route ?? "";
   return (
@@ -161,6 +175,7 @@ export function GuestRow({ g, peer }: { g: Guest; peer?: PeerInfo }) {
                 · {routeShort[route] ?? route}
               </span>
             )}
+            {peers.length > 1 && <span className="ml-1.5 text-xs text-zinc-500">· ×{peers.length}</span>}
           </span>
         </button>
         <span className="shrink-0 text-xs text-zinc-500">
@@ -174,15 +189,19 @@ export function GuestRow({ g, peer }: { g: Guest; peer?: PeerInfo }) {
           <X className="h-4 w-4" />
         </button>
       </div>
-      {open && <RouteDetails g={g} peer={peer} />}
+      {open && <RouteDetails g={g} peers={peers} />}
     </li>
   );
 }
 
-function RouteDetails({ g, peer }: { g: Guest; peer?: PeerInfo }) {
+function RouteDetails({ g, peers }: { g: Guest; peers: PeerInfo[] }) {
+  const peer = peers[0];
   const d = describe(g, peer);
   const path = peer?.path;
-  const rates = useRates(peer);
+  const sum = totals(peers);
+  const rates = useRates(sum.sent, sum.recv);
+  // Parallel connections may take different paths (rare); flag it.
+  const routes = new Set(peers.map((p) => p.path?.route).filter(Boolean));
   return (
     <div className="sb-fade-in mt-1 mb-2 ml-6 space-y-3 rounded-xl bg-zinc-50 p-3 dark:bg-zinc-800/40">
       <div className={cx("flex gap-2.5 rounded-lg p-2.5 text-xs ring-1", toneCls[d.tone])}>
@@ -208,8 +227,13 @@ function RouteDetails({ g, peer }: { g: Guest; peer?: PeerInfo }) {
             <Metric label="Round-trip time" value={path.rttMs > 0 ? `${path.rttMs < 10 ? path.rttMs.toFixed(1) : Math.round(path.rttMs)} ms` : "—"} />
             <Metric label="Sending now" value={rates.out >= 2048 ? formatSpeed(rates.out) : "idle"} />
             <Metric label="Receiving now" value={rates.in >= 2048 ? formatSpeed(rates.in) : "idle"} />
-            <Metric label="Sent on this connection" value={formatBytes(path.bytesSent)} />
-            <Metric label="Received on this connection" value={formatBytes(path.bytesReceived)} />
+            <Metric label={peers.length > 1 ? "Sent (all connections)" : "Sent on this connection"} value={formatBytes(sum.sent)} />
+            <Metric label={peers.length > 1 ? "Received (all connections)" : "Received on this connection"} value={formatBytes(sum.recv)} />
+            <Metric
+              label="Parallel connections"
+              value={peers.length > 1 ? `${peers.length}${routes.size > 1 ? " (mixed paths)" : ""}` : "1"}
+              hint="Large files are split into pieces that travel over several connections at once. Each connection recovers from packet loss on its own, so together they are much faster on Wi-Fi and long distances."
+            />
             <Metric label="Connected for" value={fmtDuration(path.since)} />
             <Metric
               label="Congestion window"

@@ -618,13 +618,18 @@ func (s *Session) serve(st *stream, head p.RequestHead) {
 		st.inEnded = true
 		st.inMu.Unlock()
 	}
+	// Browsers send header names in any case; canonicalise them like
+	// net/http does for real connections so Header.Get finds them.
+	hdr := http.Header{}
+	for k, v := range head.Header {
+		for _, vv := range v {
+			hdr.Add(k, vv)
+		}
+	}
 	req := &http.Request{
 		Method: head.Method, URL: u, RequestURI: head.URI, Proto: "HTTP/1.1", ProtoMajor: 1, ProtoMinor: 1,
-		Header: http.Header(head.Header), Body: body, Host: "sharebox.tunnel", RemoteAddr: "tunnel",
+		Header: hdr, Body: body, Host: "sharebox.tunnel", RemoteAddr: "tunnel",
 		ContentLength: -1,
-	}
-	if req.Header == nil {
-		req.Header = http.Header{}
 	}
 	if cl := req.Header.Get("Content-Length"); cl != "" {
 		if n, err := strconv.ParseInt(cl, 10, 64); err == nil && n >= 0 {
@@ -741,7 +746,7 @@ func (s *Session) RoundTrip(req *http.Request) (*http.Response, error) {
 	case head := <-st.resCh:
 		res := &http.Response{
 			Status: fmt.Sprintf("%d %s", head.Status, http.StatusText(head.Status)), StatusCode: head.Status,
-			Proto: "HTTP/1.1", ProtoMajor: 1, ProtoMinor: 1, Header: http.Header(head.Header),
+			Proto: "HTTP/1.1", ProtoMajor: 1, ProtoMinor: 1, Header: canonical(head.Header),
 			Body: &clientBody{st: st, stop: stop}, ContentLength: -1, Request: req,
 		}
 		if res.Header == nil {
@@ -758,6 +763,16 @@ func (s *Session) RoundTrip(req *http.Request) (*http.Response, error) {
 		stop()
 		return nil, context.Cause(st.ctx)
 	}
+}
+
+func canonical(h map[string][]string) http.Header {
+	out := http.Header{}
+	for k, v := range h {
+		for _, vv := range v {
+			out.Add(k, vv)
+		}
+	}
+	return out
 }
 
 type clientBody struct {

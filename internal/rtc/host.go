@@ -66,7 +66,9 @@ type Host struct {
 }
 
 type peer struct {
-	id          string
+	id          string // key in Host.peers: base, or base#conn for parallel connections
+	base        string // guest's signalling peer id
+	conn        int    // 0 = primary connection
 	pc          *webrtc.PeerConnection
 	sess        *tunnel.Session
 	transport   atomic.Value // string
@@ -154,6 +156,8 @@ type PathInfo struct {
 // PeerInfo describes a peer connection.
 type PeerInfo struct {
 	ID        string    `json:"id"`
+	Group     string    `json:"group"` // same for all parallel connections of a guest
+	Conn      int       `json:"conn"`
 	Transport string    `json:"transport"`
 	Connected bool      `json:"connected"`
 	Guests    []string  `json:"guests"`
@@ -248,7 +252,7 @@ func (h *Host) Peers() []PeerInfo {
 	var out []PeerInfo
 	for _, sn := range list {
 		t, _ := sn.pr.transport.Load().(string)
-		pi := PeerInfo{ID: sn.pr.id, Transport: t, Connected: sn.conn, Guests: sn.guests}
+		pi := PeerInfo{ID: sn.pr.id, Group: sn.pr.base, Conn: sn.pr.conn, Transport: t, Connected: sn.conn, Guests: sn.guests}
 		if sn.conn {
 			pi.Path = h.pathInfo(sn.pr)
 		}
@@ -314,12 +318,26 @@ func (h *Host) GuestAuthenticated(guest, peerTag string) {
 	h.mu.Unlock()
 }
 
-// DropGuest closes connections used by a guest id.
+// peerKey identifies one of a guest's connections.
+func peerKey(base string, conn int) string {
+	if conn == 0 {
+		return base
+	}
+	return fmt.Sprintf("%s#%d", base, conn)
+}
+
+// DropGuest closes every connection (including parallel ones) of a guest.
 func (h *Host) DropGuest(guest string) {
 	h.mu.Lock()
+	bases := map[string]bool{}
+	for _, pr := range h.peers {
+		if pr.guests[guest] {
+			bases[pr.base] = true
+		}
+	}
 	var victims []*peer
 	for id, pr := range h.peers {
-		if pr.guests[guest] {
+		if bases[pr.base] {
 			victims = append(victims, pr)
 			delete(h.peers, id)
 		}
@@ -335,14 +353,15 @@ func (h *Host) DropGuest(guest string) {
 // that never connected are cleaned up.
 func (h *Host) GuestLeft(id string) {
 	h.mu.Lock()
-	pr := h.peers[id]
-	if pr != nil && pr.sess == nil {
-		delete(h.peers, id)
-	} else {
-		pr = nil
+	var victims []*peer
+	for key, pr := range h.peers {
+		if pr.base == id && pr.sess == nil {
+			delete(h.peers, key)
+			victims = append(victims, pr)
+		}
 	}
 	h.mu.Unlock()
-	if pr != nil {
+	for _, pr := range victims {
 		h.closePeer(pr, "")
 	}
 }
@@ -359,12 +378,16 @@ func (h *Host) closePeer(pr *peer, why string) {
 
 // OnSignal handles a signalling message from a guest.
 func (h *Host) OnSignal(id string, d *p.SignalPayload) {
+	if d.Conn < 0 || d.Conn >= p.MaxParallelConns {
+		return
+	}
+	key := peerKey(id, d.Conn)
 	switch d.Kind {
 	case "offer":
 		go h.handleOffer(id, d)
 	case "candidate":
 		h.mu.Lock()
-		pr := h.peers[id]
+		pr := h.peers[key]
 		if pr == nil {
 			h.mu.Unlock()
 			return
@@ -387,8 +410,8 @@ func (h *Host) OnSignal(id string, d *p.SignalPayload) {
 		}
 	case "bye":
 		h.mu.Lock()
-		pr := h.peers[id]
-		delete(h.peers, id)
+		pr := h.peers[key]
+		delete(h.peers, key)
 		h.mu.Unlock()
 		if pr != nil {
 			h.closePeer(pr, "guest left")
@@ -398,7 +421,9 @@ func (h *Host) OnSignal(id string, d *p.SignalPayload) {
 
 var fpRe = regexp.MustCompile(`(?m)^a=fingerprint:sha-256 ([0-9A-Fa-f:]+)`)
 
-func (h *Host) handleOffer(id string, d *p.SignalPayload) {
+func (h *Host) handleOffer(base string, d *p.SignalPayload) {
+	conn := d.Conn
+	id := peerKey(base, conn)
 	h.mu.Lock()
 	if old := h.peers[id]; old != nil {
 		delete(h.peers, id)
@@ -406,7 +431,7 @@ func (h *Host) handleOffer(id string, d *p.SignalPayload) {
 		h.closePeer(old, "renegotiating")
 		h.mu.Lock()
 	}
-	if len(h.peers) >= 64 {
+	if len(h.peers) >= 64*p.MaxParallelConns {
 		h.mu.Unlock()
 		h.log.Warn("rejecting guest: too many peers")
 		return
@@ -421,7 +446,7 @@ func (h *Host) handleOffer(id string, d *p.SignalPayload) {
 		h.log.Error("cannot create peer connection", "err", err)
 		return
 	}
-	pr := &peer{id: id, pc: pc, created: time.Now(), guests: map[string]bool{}}
+	pr := &peer{id: id, base: base, conn: conn, pc: pc, created: time.Now(), guests: map[string]bool{}}
 	pr.transport.Store("")
 	pr.route.Store("")
 	h.peers[id] = pr
@@ -432,7 +457,7 @@ func (h *Host) handleOffer(id string, d *p.SignalPayload) {
 			return
 		}
 		ci := c.ToJSON()
-		sp := &p.SignalPayload{Kind: "candidate", Candidate: ci.Candidate}
+		sp := &p.SignalPayload{Kind: "candidate", Candidate: ci.Candidate, Conn: conn}
 		if ci.SDPMid != nil {
 			sp.SDPMid = *ci.SDPMid
 		}
@@ -440,7 +465,7 @@ func (h *Host) handleOffer(id string, d *p.SignalPayload) {
 			v := int(*ci.SDPMLineIndex)
 			sp.SDPMLine = &v
 		}
-		h.cfg.SendSignal(id, sp)
+		h.cfg.SendSignal(base, sp)
 	})
 	pc.OnConnectionStateChange(func(s webrtc.PeerConnectionState) {
 		if s == webrtc.PeerConnectionStateFailed || s == webrtc.PeerConnectionStateClosed {
@@ -493,8 +518,14 @@ func (h *Host) handleOffer(id string, d *p.SignalPayload) {
 	if m := fpRe.FindStringSubmatch(sdp); m != nil {
 		fp = m[1]
 	}
-	h.cfg.SendSignal(id, &p.SignalPayload{Kind: "answer", SDP: sdp,
-		FingerprintMAC: security.FingerprintMAC(h.cfg.AccessKey(), fp)})
+	answer := &p.SignalPayload{Kind: "answer", SDP: sdp, Conn: conn,
+		FingerprintMAC: security.FingerprintMAC(h.cfg.AccessKey(), fp)}
+	if conn == 0 {
+		// Invite the guest to open parallel connections; each has its own
+		// congestion control, which multiplies throughput on lossy links.
+		answer.Parallel = p.MaxParallelConns
+	}
+	h.cfg.SendSignal(base, answer)
 
 	// Give up on peers that never connect.
 	time.AfterFunc(45*time.Second, func() {

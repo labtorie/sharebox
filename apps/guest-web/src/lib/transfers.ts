@@ -2,6 +2,7 @@
 
 import { Api, ApiError, sleep, type Entry } from "./api";
 import { sha256Hex } from "./protocol";
+import { MIN_PARALLEL_SIZE, ParallelDownload, parallelUpload, type Pool } from "./parallel";
 import type { Transport } from "./transport";
 
 export type JobKind = "upload" | "download" | "zip";
@@ -39,6 +40,8 @@ export class Transfers {
   constructor(
     private api: Api,
     private transport: () => Promise<Transport>,
+    /** Parallel connections (WebRTC only); absent for direct HTTPS. */
+    private conns?: Pool,
   ) {
     this.ticker = setInterval(() => {
       let changed = false;
@@ -148,6 +151,15 @@ export class Transfers {
 
   private async runUpload(j: Internal, file: File) {
     const signal = j.abort.signal;
+    if (this.conns && this.conns.parallel() > 1 && file.size >= MIN_PARALLEL_SIZE) {
+      const name = await parallelUpload(this.api, this.conns, file, j.dir, signal, (n) => {
+        j.done = n;
+      });
+      if (name && name !== file.name) j.note = `Saved as “${name}”`;
+      j.done = file.size;
+      this.onUploaded?.(j.dir);
+      return;
+    }
     const create = async () => {
       const r = await this.api.raw("POST", "/api/uploads", {
         body: JSON.stringify({ dir: j.dir, name: file.name, size: file.size, modTime: file.lastModified }),
@@ -278,7 +290,16 @@ export class Transfers {
     // Next chunk, transparently resuming with a Range request after a
     // connection drop. ZIP streams are generated on the fly and cannot be
     // resumed.
+    // Large files are fetched in pieces over all parallel connections.
+    const par =
+      !isZip && this.conns && this.conns.parallel() > 1 && j.size >= MIN_PARALLEL_SIZE
+        ? new ParallelDownload(this.api, uri, j.size, this.conns, signal, (n) => {
+            received += n;
+            j.done = received;
+          })
+        : null;
     const next = async (): Promise<Uint8Array | null> => {
+      if (par) return par.next();
       for (;;) {
         try {
           if (!reader) await open();

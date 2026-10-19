@@ -123,7 +123,17 @@ type SignalPayload struct {
 	FingerprintMAC string `json:"fpmac,omitempty"`
 	// Policy lets a guest request relay-only ICE (used for diagnostics).
 	Policy string `json:"policy,omitempty"`
+	// Conn numbers a guest's parallel connections (0 = primary). Each one is
+	// a separate PeerConnection with its own congestion control.
+	Conn int `json:"conn,omitempty"`
+	// Parallel, in the host's answer to the primary connection, is how many
+	// connections the guest may open in total. Absent from older hosts, in
+	// which case guests use a single connection.
+	Parallel int `json:"parallel,omitempty"`
 }
+
+// MaxParallelConns is how many connections a host accepts per guest.
+const MaxParallelConns = 4
 
 // ProbePath is served by the host for the reachability check.
 const ProbePath = "/.well-known/sharebox-probe"

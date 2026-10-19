@@ -416,6 +416,90 @@ func Run(t *testing.T, newEnv Factory) {
 		}
 	})
 
+	t.Run("ParallelUploadOutOfOrder", func(t *testing.T) {
+		e, c := setup(t, nil)
+		const chunk = 8 << 20
+		data := randBytes(3*chunk + 12345) // 4 chunks, last one short
+		var cr struct {
+			ID        string `json:"id"`
+			ChunkSize int    `json:"chunkSize"`
+		}
+		if st := c.JSON("POST", "/api/uploads", map[string]any{"dir": "", "name": "par.bin", "size": len(data), "parallel": true}, &cr); st != 201 || cr.ChunkSize != chunk {
+			t.Fatalf("create: %d chunk=%d", st, cr.ChunkSize)
+		}
+		put := func(off int, body []byte, sum []byte) int {
+			h := map[string]string{"X-Chunk-SHA256": hex.EncodeToString(sum)}
+			res, err := c.do("PUT", fmt.Sprintf("/api/uploads/%s?offset=%d", cr.ID, off), bytes.NewReader(body), h)
+			if err != nil {
+				t.Fatal(err)
+			}
+			io.Copy(io.Discard, res.Body)
+			res.Body.Close()
+			return res.StatusCode
+		}
+		piece := func(i int) ([]byte, []byte) {
+			b := data[i*chunk : min((i+1)*chunk, len(data))]
+			s := sha256.Sum256(b)
+			return b, s[:]
+		}
+		// Chunks 3 and 1 arrive first, concurrently.
+		var wg sync.WaitGroup
+		for _, i := range []int{3, 1} {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				b, sum := piece(i)
+				if st := put(i*chunk, b, sum); st != 200 {
+					t.Errorf("chunk %d: %d", i, st)
+				}
+			}(i)
+		}
+		wg.Wait()
+		// Not complete yet.
+		if st := c.JSON("POST", "/api/uploads/"+cr.ID+"/complete", nil, nil); st != 409 {
+			t.Fatalf("early complete: %d", st)
+		}
+		// A corrupted chunk is rejected; misaligned offsets are refused.
+		b0, s0 := piece(0)
+		bad := append([]byte(nil), b0...)
+		bad[7] ^= 1
+		if st := put(0, bad, s0); st != 422 {
+			t.Fatalf("corrupt chunk: %d", st)
+		}
+		if st := put(100, b0[:100], s0); st != 400 {
+			t.Fatalf("misaligned chunk: %d", st)
+		}
+		// Status reports which chunks the host has, for resuming.
+		var stt struct {
+			Offset int64   `json:"offset"`
+			Done   []int64 `json:"done"`
+		}
+		c.JSON("GET", "/api/uploads/"+cr.ID, nil, &stt)
+		if stt.Offset != 0 || len(stt.Done) != 2 || stt.Done[0] != chunk || stt.Done[1] != 3*chunk {
+			t.Fatalf("status: %+v", stt)
+		}
+		for _, i := range []int{0, 2} {
+			b, sum := piece(i)
+			if st := put(i*chunk, b, sum); st != 200 {
+				t.Fatalf("chunk %d: %d", i, st)
+			}
+		}
+		// Re-sending a chunk is harmless.
+		if b, sum := piece(2); put(2*chunk, b, sum) != 200 {
+			t.Fatal("duplicate chunk refused")
+		}
+		var done struct {
+			Path string `json:"path"`
+		}
+		if st := c.JSON("POST", "/api/uploads/"+cr.ID+"/complete", nil, &done); st != 200 {
+			t.Fatalf("complete: %d", st)
+		}
+		disk, _ := os.ReadFile(filepath.Join(e.Dir, "par.bin"))
+		if !bytes.Equal(disk, data) {
+			t.Fatal("parallel upload corrupted")
+		}
+	})
+
 	t.Run("Permissions", func(t *testing.T) {
 		e, c := setup(t, nil)
 		if st := c.JSON("POST", "/api/delete", map[string]string{"path": "hello.txt"}, nil); st != 403 {

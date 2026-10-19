@@ -254,6 +254,8 @@ export namespace rtc {
 	}
 	export class PeerInfo {
 	    id: string;
+	    group: string;
+	    conn: number;
 	    transport: string;
 	    connected: boolean;
 	    guests: string[];
@@ -266,6 +268,8 @@ export namespace rtc {
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.id = source["id"];
+	        this.group = source["group"];
+	        this.conn = source["conn"];
 	        this.transport = source["transport"];
 	        this.connected = source["connected"];
 	        this.guests = source["guests"];

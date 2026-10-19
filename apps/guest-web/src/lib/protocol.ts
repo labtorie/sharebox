@@ -34,6 +34,10 @@ export interface SignalPayload {
   sdpMLineIndex?: number;
   fpmac?: string;
   policy?: string;
+  /** Parallel connection number (0 = primary). */
+  conn?: number;
+  /** In the host's answer: how many connections the guest may open. */
+  parallel?: number;
 }
 
 export interface Envelope {

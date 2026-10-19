@@ -250,3 +250,27 @@ func TestTunnelRejectsWindowViolation(t *testing.T) {
 		t.Fatal("handler not failed")
 	}
 }
+
+// Header names from browsers are not canonical ("X-Chunk-SHA256"); the host
+// must still see them, or digest checks would be silently skipped.
+func TestTunnelCanonicalisesHeaders(t *testing.T) {
+	got := make(chan string, 1)
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { got <- r.Header.Get("X-Chunk-Sha256") })
+	cl, sl := tunnel.NewMemPair()
+	server := tunnel.New(sl, tunnel.Options{Handler: h})
+	sl.Bind(server, nil)
+	defer server.Close(nil)
+	m := make([]byte, 9)
+	m[0] = p.FrameHeaders
+	binary.BigEndian.PutUint32(m[1:], 1)
+	server.Deliver(append(m, []byte(`{"m":"GET","u":"/x","h":{"X-Chunk-SHA256":["abc"]},"b":false}`)...))
+	_ = cl
+	select {
+	case v := <-got:
+		if v != "abc" {
+			t.Fatalf("header not found: %q", v)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("handler not called")
+	}
+}

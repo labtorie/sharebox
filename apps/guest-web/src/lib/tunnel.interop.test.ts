@@ -119,3 +119,49 @@ describe("TS tunnel ⇄ Go host", () => {
     await expect(api.auth()).rejects.toThrow();
   });
 });
+
+describe("parallel transfers over several connections", () => {
+  it("downloads pieces over all connections in order", async () => {
+    const conns = await Promise.all([connect(), connect(), connect()]);
+    const transports = conns.map((c) => c.transport);
+    const api = new Api(async () => transports[0], key);
+    await api.auth();
+    const { ParallelDownload } = await import("./parallel");
+    const want = readFileSync(join(dir, "big.bin"));
+    const used = new Set<number>();
+    const pool = {
+      pool: () => transports,
+      parallel: () => transports.length,
+      primary: async () => transports[0],
+    };
+    // Record which connection served each request.
+    transports.forEach((t, i) => {
+      const orig = t.request.bind(t);
+      t.request = (r) => (used.add(i), orig(r));
+    });
+    let bytes = 0;
+    const pd = new ParallelDownload(api, "/api/download/big.bin?path=big.bin", want.length, pool, new AbortController().signal, (n) => (bytes += n));
+    const parts: Buffer[] = [];
+    for (let c = await pd.next(); c; c = await pd.next()) parts.push(Buffer.from(c));
+    const got = Buffer.concat(parts);
+    expect(got.length).toBe(want.length);
+    expect(got.equals(want)).toBe(true);
+    expect(bytes).toBe(want.length);
+    expect(used.size).toBeGreaterThan(1); // pieces really went over several connections
+  });
+
+  it("uploads chunks out of order over several connections", async () => {
+    const conns = await Promise.all([connect(), connect(), connect(), connect()]);
+    const transports = conns.map((c) => c.transport);
+    const api = new Api(async () => transports[0], key);
+    await api.auth();
+    const { parallelUpload } = await import("./parallel");
+    const data = new Uint8Array(3 * 8 * 1024 * 1024 + 4321).map((_, i) => (i * 7 + 1) & 0xff);
+    const pool = { pool: () => transports, parallel: () => 4, primary: async () => transports[0] };
+    let last = 0;
+    const name = await parallelUpload(api, pool, new File([data], "par-ts.bin"), "", new AbortController().signal, (n) => (last = n));
+    expect(name).toBe("par-ts.bin");
+    expect(last).toBe(data.length);
+    expect(Buffer.from(data).equals(readFileSync(join(dir, "par-ts.bin")))).toBe(true);
+  }, 60_000);
+});

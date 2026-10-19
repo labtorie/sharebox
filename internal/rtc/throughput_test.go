@@ -58,6 +58,12 @@ func (p *policer) allow(n int) bool {
 // measure transfers size bytes host->guest over a real pion DataChannel on a
 // virtual network and returns MB/s.
 func measure(t *testing.T, tun TransportTuning, c netCondition, size int64) (float64, float64) {
+	return measureN(t, tun, c, size, 1)
+}
+
+// measureN downloads size bytes split evenly over conns independent
+// PeerConnections (each with its own SCTP congestion control).
+func measureN(t *testing.T, tun TransportTuning, c netCondition, size int64, conns int) (float64, float64) {
 	t.Helper()
 	lf := logging.NewDefaultLoggerFactory()
 	lf.DefaultLogLevel = logging.LogLevelError
@@ -95,6 +101,55 @@ func measure(t *testing.T, tun TransportTuning, c netCondition, size int64) (flo
 	}
 	defer wan.Stop()
 
+	part := size / int64(conns)
+	clients := make([]*tunnel.Session, conns)
+	for i := range clients {
+		clients[i] = connectPair(t, tun, hostNet, guestNet, part)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	start := time.Now()
+	var wg sync.WaitGroup
+	errs := make(chan error, conns)
+	for _, cl := range clients {
+		wg.Add(1)
+		go func(cl *tunnel.Session) {
+			defer wg.Done()
+			req, _ := http.NewRequestWithContext(ctx, "GET", "http://tunnel/x", nil)
+			res, err := (&http.Client{Transport: cl}).Do(req)
+			if err != nil {
+				errs <- err
+				return
+			}
+			n, err := io.Copy(io.Discard, res.Body)
+			if err == nil && n != part {
+				err = fmt.Errorf("got %d of %d bytes", n, part)
+			}
+			if err != nil {
+				errs <- err
+			}
+		}(cl)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatal(err)
+	}
+	elapsed := time.Since(start)
+	size = part * int64(conns)
+	dropPct := 0.0
+	if pol != nil {
+		pol.mu.Lock()
+		dropPct = 100 * float64(pol.drops) / float64(max(1, pol.drops+pol.passed))
+		pol.mu.Unlock()
+	}
+	return float64(size) / (1 << 20) / elapsed.Seconds(), dropPct
+}
+
+// connectPair negotiates one host/guest PeerConnection pair on the virtual
+// network and returns the guest's tunnel client; the host serves part bytes.
+func connectPair(t *testing.T, tun TransportTuning, hostNet, guestNet *vnet.Net, part int64) *tunnel.Session {
+	t.Helper()
 	newPC := func(n *vnet.Net) *webrtc.PeerConnection {
 		se := tun.settingEngine()
 		se.SetNet(n)
@@ -102,15 +157,11 @@ func measure(t *testing.T, tun TransportTuning, c netCondition, size int64) (flo
 		if err != nil {
 			t.Fatal(err)
 		}
+		t.Cleanup(func() { pc.Close() })
 		return pc
 	}
 	hostPC, guestPC := newPC(hostNet), newPC(guestNet)
-	defer hostPC.Close()
-	defer guestPC.Close()
-
-	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		io.CopyN(w, zeros{}, size)
-	})
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.CopyN(w, zeros{}, part) })
 	serving := make(chan struct{})
 	hostPC.OnDataChannel(func(dc *webrtc.DataChannel) {
 		dc.OnOpen(func() {
@@ -125,8 +176,6 @@ func measure(t *testing.T, tun TransportTuning, c netCondition, size int64) (flo
 	dc, _ := guestPC.CreateDataChannel(p.TunnelLabel, &webrtc.DataChannelInit{Ordered: &ordered})
 	opened := make(chan struct{})
 	dc.OnOpen(func() { close(opened) })
-
-	// Non-trickle negotiation keeps the benchmark simple.
 	offer, _ := guestPC.CreateOffer(nil)
 	g := webrtc.GatheringCompletePromise(guestPC)
 	guestPC.SetLocalDescription(offer)
@@ -143,31 +192,11 @@ func measure(t *testing.T, tun TransportTuning, c netCondition, size int64) (flo
 		t.Fatal("data channel did not open")
 	}
 	<-serving
-
 	client := tunnel.New(dcLink{dc}, tunnel.Options{})
 	dc.SetBufferedAmountLowThreshold(p.LowWaterMark)
 	dc.OnBufferedAmountLow(client.BufferedLow)
 	dc.OnMessage(func(m webrtc.DataChannelMessage) { client.Deliver(m.Data) })
-
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
-	req, _ := http.NewRequestWithContext(ctx, "GET", "http://tunnel/x", nil)
-	start := time.Now()
-	res, err := (&http.Client{Transport: client}).Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	n, err := io.Copy(io.Discard, res.Body)
-	if err != nil || n != size {
-		t.Fatalf("got %d bytes: %v", n, err)
-	}
-	dropPct := 0.0
-	if pol != nil {
-		pol.mu.Lock()
-		dropPct = 100 * float64(pol.drops) / float64(max(1, pol.drops+pol.passed))
-		pol.mu.Unlock()
-	}
-	return float64(size) / (1 << 20) / time.Since(start).Seconds(), dropPct
+	return client
 }
 
 type zeros struct{}
@@ -212,6 +241,8 @@ func TestThroughputUnderNetworkConditions(t *testing.T) {
 		for _, name := range strings.Split(v, ",") {
 			if tv, ok := benchVariants[name]; ok {
 				variants[name] = tv
+			} else if strings.HasPrefix(name, "x") {
+				variants[name] = Tuning // xN: current tuning over N connections
 			}
 		}
 	}
@@ -222,7 +253,11 @@ func TestThroughputUnderNetworkConditions(t *testing.T) {
 	var out strings.Builder
 	for _, c := range conds {
 		for name, v := range variants {
-			mbps, drops := measure(t, v, c, size)
+			conns := 1
+			if n, err := strconv.Atoi(strings.TrimPrefix(name, "x")); err == nil && strings.HasPrefix(name, "x") {
+				conns = n
+			}
+			mbps, drops := measureN(t, v, c, size, conns)
 			fmt.Fprintf(&out, "%-32s %-14s %6.1f MB/s  bottleneck drops %4.1f%%\n", c.name, name, mbps, drops)
 		}
 	}

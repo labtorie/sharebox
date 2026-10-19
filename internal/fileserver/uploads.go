@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -44,16 +45,21 @@ const (
 )
 
 type upload struct {
-	mu       sync.Mutex
-	id       string
-	guest    string
-	dir      string // cleaned guest dir
-	name     string // sanitised file name
-	size     int64
-	offset   int64
-	modTime  time.Time
-	touched  time.Time
-	busy     bool
+	mu      sync.Mutex
+	id      string
+	guest   string
+	dir     string // cleaned guest dir
+	name    string // sanitised file name
+	size    int64
+	offset  int64
+	modTime time.Time
+	touched time.Time
+	busy    bool
+	// Parallel uploads accept chunk-aligned pieces in any order and from
+	// several connections at once.
+	parallel bool
+	done     map[int64]int64 // received chunks: offset -> length
+	inflight map[int64]bool  // chunks being written right now
 	tr       *transfers.Handle
 	ctx      context.Context
 	cancel   context.CancelFunc
@@ -127,7 +133,7 @@ func (m *uploadManager) reaper() {
 			m.mu.Lock()
 			for id, u := range m.uploads {
 				u.mu.Lock()
-				idle := !u.busy && time.Since(u.touched) > uploadIdleTimeout
+				idle := !u.busy && len(u.inflight) == 0 && time.Since(u.touched) > uploadIdleTimeout
 				u.mu.Unlock()
 				if idle {
 					m.dropLocked(id, u, errors.New("upload abandoned"))
@@ -156,6 +162,8 @@ type createReq struct {
 	Name    string `json:"name"`
 	Size    int64  `json:"size"`
 	ModTime int64  `json:"modTime"` // unix milliseconds, optional
+	// Parallel opts into out-of-order chunk writes (see handleParallelChunk).
+	Parallel bool `json:"parallel,omitempty"`
 }
 
 func (m *uploadManager) handleCreate(w http.ResponseWriter, r *http.Request) {
@@ -233,7 +241,8 @@ func (m *uploadManager) handleCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	f.Close()
-	u := &upload{id: id, guest: guest, dir: dir.Path, name: name, size: req.Size, touched: time.Now()}
+	u := &upload{id: id, guest: guest, dir: dir.Path, name: name, size: req.Size, touched: time.Now(),
+		parallel: req.Parallel, done: map[int64]int64{}, inflight: map[int64]bool{}}
 	u.ctx, u.cancel = context.WithCancel(context.Background())
 	if req.ModTime > 0 {
 		u.modTime = time.UnixMilli(req.ModTime)
@@ -262,7 +271,16 @@ func (m *uploadManager) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	writeJSON(w, http.StatusOK, map[string]any{"offset": u.offset, "size": u.size})
+	res := map[string]any{"offset": u.offset, "size": u.size}
+	if u.parallel {
+		done := make([]int64, 0, len(u.done))
+		for off := range u.done {
+			done = append(done, off)
+		}
+		slices.Sort(done)
+		res["done"] = done // chunk offsets already received
+	}
+	writeJSON(w, http.StatusOK, res)
 }
 
 func (m *uploadManager) handleChunk(w http.ResponseWriter, r *http.Request) {
@@ -286,6 +304,11 @@ func (m *uploadManager) handleChunk(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusBadRequest, "invalid chunk digest")
 			return
 		}
+	}
+
+	if u.parallel {
+		m.handleParallelChunk(w, r, u, off, wantSum)
+		return
 	}
 
 	u.mu.Lock()
@@ -407,6 +430,120 @@ func (m *uploadManager) write(r *http.Request, u *upload, off int64, wantSum []b
 	return n, nil
 }
 
+// handleParallelChunk writes one chunk of a parallel upload. Chunks must be
+// aligned to chunkSize, carry a SHA-256 digest and may arrive in any order
+// and concurrently; each is committed only if its digest matches. u.offset
+// tracks the contiguous received prefix, so completion and resume work as
+// for sequential uploads.
+func (m *uploadManager) handleParallelChunk(w http.ResponseWriter, r *http.Request, u *upload, off int64, wantSum []byte) {
+	s := m.s
+	if wantSum == nil {
+		writeErr(w, http.StatusBadRequest, "parallel uploads require X-Chunk-SHA256")
+		return
+	}
+	if off%chunkSize != 0 || off >= u.size {
+		writeErr(w, http.StatusBadRequest, "invalid chunk offset")
+		return
+	}
+	want := min(int64(chunkSize), u.size-off)
+
+	u.mu.Lock()
+	switch {
+	case u.finished:
+		u.mu.Unlock()
+		writeErr(w, http.StatusConflict, "upload already completed")
+		return
+	case u.done[off] > 0:
+		cur := u.offset
+		u.mu.Unlock()
+		discard(r.Body)
+		writeJSON(w, http.StatusOK, map[string]any{"offset": cur, "duplicate": true})
+		return
+	case u.inflight[off]:
+		u.mu.Unlock()
+		writeErr(w, http.StatusConflict, "this chunk is already being written")
+		return
+	}
+	u.inflight[off] = true
+	u.touched = time.Now()
+	if u.tr == nil {
+		u.tr = s.tracker.Begin(u.guest, transfers.Upload, u.name, u.size, transportOf(r), func() { m.abort(u) })
+	}
+	u.mu.Unlock()
+
+	release, ok := s.acquire(w, r)
+	if !ok {
+		u.mu.Lock()
+		delete(u.inflight, off)
+		u.mu.Unlock()
+		return
+	}
+	defer release()
+
+	err := m.writeAt(r, u, off, want, wantSum)
+
+	u.mu.Lock()
+	delete(u.inflight, off)
+	u.touched = time.Now()
+	if err == nil {
+		u.done[off] = want
+		for u.done[u.offset] > 0 {
+			u.offset += u.done[u.offset]
+		}
+	}
+	cur := u.offset
+	u.mu.Unlock()
+	if err == nil {
+		m.mu.Lock()
+		m.reserved -= want
+		m.received += want
+		m.mu.Unlock()
+	}
+	switch {
+	case err == nil:
+		writeJSON(w, http.StatusOK, map[string]any{"offset": cur})
+	case errors.Is(err, errDigest):
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"error": "chunk was corrupted in transit; retrying", "offset": cur})
+	case errors.Is(err, errTooLarge), errors.Is(err, errShort):
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "chunk has the wrong length", "offset": cur})
+	default:
+		if r.Context().Err() == nil {
+			s.log.Warn("upload chunk failed", "err", err)
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "upload interrupted; it will resume", "offset": cur})
+	}
+}
+
+var errShort = errors.New("short chunk")
+
+// writeAt stores exactly want bytes at off. Nothing is marked as received
+// unless the length and digest match, so a failed write is simply retried.
+func (m *uploadManager) writeAt(r *http.Request, u *upload, off, want int64, wantSum []byte) error {
+	ir, err := m.dir()
+	if err != nil {
+		return err
+	}
+	f, err := ir.OpenFile(u.id+".part", os.O_WRONLY, 0)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	h := sha256.New()
+	dst := io.MultiWriter(io.NewOffsetWriter(f, off), h)
+	n, err := io.Copy(m.s.tracker.Writer(u.tr, dst), io.LimitReader(ctxReader{u.ctx, r.Body}, want+1))
+	switch {
+	case err != nil:
+		return err
+	case n > want:
+		return errTooLarge
+	case n < want:
+		return errShort
+	case !equalBytes(h.Sum(nil), wantSum):
+		return errDigest
+	}
+	return nil
+}
+
 // abort is called when the host cancels an upload from its UI.
 func (m *uploadManager) abort(u *upload) {
 	u.cancel()
@@ -438,7 +575,7 @@ func (m *uploadManager) handleComplete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	u.mu.Lock()
-	if u.busy || u.finished {
+	if u.busy || len(u.inflight) > 0 || u.finished {
 		u.mu.Unlock()
 		writeErr(w, http.StatusConflict, "upload is busy or already completed")
 		return

@@ -89,11 +89,19 @@ export class Api {
   async raw(
     method: string,
     uri: string,
-    opts: { body?: Blob | Uint8Array | string | null; headers?: Record<string, string>; signal?: AbortSignal; onUploadProgress?: (n: number) => void; retry?: boolean } = {},
+    opts: {
+      body?: Blob | Uint8Array | string | null;
+      headers?: Record<string, string>;
+      signal?: AbortSignal;
+      onUploadProgress?: (n: number) => void;
+      retry?: boolean;
+      /** Send over this connection instead of the primary one. */
+      transport?: Transport;
+    } = {},
   ): Promise<TunnelResponse> {
     const retry = opts.retry ?? method === "GET";
     for (let attempt = 0; ; attempt++) {
-      const t = await this.getTransport();
+      const t = opts.transport && !opts.transport.closed() ? opts.transport : await this.getTransport();
       try {
         const res = await t.request({
           method,

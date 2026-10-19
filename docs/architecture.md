@@ -76,6 +76,28 @@ frame with a 9-byte header (type, stream id, sequence number).
 * Recovery happens at the HTTP layer: downloads resume with `Range`, uploads
   with `GET /api/uploads/{id}` → offset.
 
+## Parallel connections
+
+A single DataChannel is limited by its SCTP congestion control, which halves
+the window on every random loss (Wi-Fi, long paths). Hosts therefore invite
+guests to open up to 4 PeerConnections (`parallel` in the answer to the
+primary connection; connections are numbered with `conn`). Guests use them
+only when the host advertises support, so old hosts keep working.
+
+* **Downloads ≥ 16 MB** are fetched as 4 MiB Range pieces spread over all
+  connections (about two pieces in flight per connection) and handed to the
+  browser download in order. Pieces carry `X-Sharebox-Transfer` so the host
+  shows them as one transfer. A failed piece is retried on another
+  connection.
+* **Uploads ≥ 16 MB** are created with `parallel: true`; 8 MiB chunks are sent
+  concurrently and out of order, each with a mandatory SHA-256. The host
+  writes each chunk at its offset, tracks received chunks (also reported by
+  `GET /api/uploads/{id}` for resuming) and completes the file once all are
+  in.
+* Measured on a simulated link (`TestThroughputUnderNetworkConditions`):
+  Wi-Fi with 0.5% loss 9 → 33 MB/s, 0.1% loss 23 → 83 MB/s.
+* Revoking a guest closes all of its connections.
+
 ## Upload protocol
 
 `POST /api/uploads` reserves disk space and creates a private temp file in the

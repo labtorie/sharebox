@@ -10,7 +10,7 @@ export interface PathInfo {
   kind: string; route: string; local: Endpoint; remote: Endpoint;
   rttMs: number; bytesSent: number; bytesReceived: number; cwndBytes: number; since: string;
 }
-export interface PeerInfo { id: string; transport: string; connected: boolean; guests: string[] | null; path?: PathInfo }
+export interface PeerInfo { id: string; group: string; conn: number; transport: string; connected: boolean; guests: string[] | null; path?: PathInfo }
 export interface Status {
   state: "idle" | "starting" | "sharing" | "stopping";
   link?: string; linkReady: boolean; headline: string;

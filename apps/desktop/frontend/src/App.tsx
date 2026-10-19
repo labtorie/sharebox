@@ -268,7 +268,7 @@ export default function App() {
               ) : (
                 <ul className="mb-2 divide-y divide-zinc-100 dark:divide-zinc-800">
                   {guests.map((g) => (
-                    <GuestRow key={g.id} g={g} peer={peerFor(status, g.id)} />
+                    <GuestRow key={g.id} g={g} peers={peerFor(status, g.id)} />
                   ))}
                 </ul>
               )}

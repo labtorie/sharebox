@@ -85,7 +85,7 @@ test("peer-to-peer: browse, upload, download, zip, folders, search, delete", asy
   expect(viaSW).toBe(true);
 
   // Upload into the current folder.
-  const up = Buffer.alloc(11 * 1024 * 1024 + 5);
+  const up = Buffer.alloc(20 * 1024 * 1024 + 5); // above the parallel threshold
   for (let i = 0; i < up.length; i++) up[i] = (i * 29) & 255;
   await page.locator('input[type=file][multiple]').setInputFiles({ name: "from-chrome.bin", mimeType: "application/octet-stream", buffer: up });
   await expect(page.getByText("Transfers complete")).toBeVisible({ timeout: 30_000 });

@@ -57,8 +57,8 @@ type Handle struct {
 // Guest is a connected guest.
 type Guest struct {
 	ID        string    `json:"id"`
-	Transport string    `json:"transport"` // direct | p2p | relay
-	Route     string    `json:"route"`     // local network | internet | relay
+	Transport string    `json:"transport"`         // direct | p2p | relay
+	Route     string    `json:"route"`             // local network | internet | relay
 	Address   string    `json:"address,omitempty"` // client IP (direct HTTPS only)
 	Since     time.Time `json:"since"`
 	LastSeen  time.Time `json:"lastSeen"`
@@ -91,11 +91,20 @@ type Tracker struct {
 	lastTick  time.Time
 	seq       atomic.Uint64
 	onChange  func()
+	groups    map[string]*group
+}
+
+// group joins the parallel pieces of one transfer into a single entry.
+type group struct {
+	h       *Handle
+	refs    int
+	timer   *time.Timer
+	cancels []context.CancelFunc
 }
 
 // New creates a tracker.
 func New() *Tracker {
-	return &Tracker{active: map[string]*Handle{}, guests: map[string]*Guest{}, lastTick: time.Now()}
+	return &Tracker{active: map[string]*Handle{}, guests: map[string]*Guest{}, lastTick: time.Now(), groups: map[string]*group{}}
 }
 
 // OnChange registers a callback invoked (without locks held) when a transfer
@@ -121,6 +130,73 @@ func (t *Tracker) Begin(guest string, kind Kind, name string, total int64, trans
 	t.mu.Unlock()
 	t.changed()
 	return tr
+}
+
+// Join attaches a piece (e.g. one Range request of a parallel download) to
+// the transfer identified by key, creating it on first use. Call Leave when
+// the piece ends; the transfer ends shortly after its last piece.
+func (t *Tracker) Join(key, guest string, kind Kind, name string, total int64, transport string, cancel context.CancelFunc) *Handle {
+	t.mu.Lock()
+	if g := t.groups[key]; g != nil {
+		if _, alive := t.active[g.h.info.ID]; alive {
+			g.refs++
+			if cancel != nil {
+				g.cancels = append(g.cancels, cancel)
+			}
+			if g.timer != nil {
+				g.timer.Stop()
+				g.timer = nil
+			}
+			h := g.h
+			t.mu.Unlock()
+			return h
+		}
+	}
+	t.mu.Unlock()
+	g := &group{refs: 1}
+	if cancel != nil {
+		g.cancels = []context.CancelFunc{cancel}
+	}
+	// Cancelling the transfer from the host UI stops every piece.
+	g.h = t.Begin(guest, kind, name, total, transport, func() {
+		t.mu.Lock()
+		cs := append([]context.CancelFunc(nil), g.cancels...)
+		t.mu.Unlock()
+		for _, c := range cs {
+			c()
+		}
+	})
+	t.mu.Lock()
+	t.groups[key] = g
+	t.mu.Unlock()
+	return g.h
+}
+
+// Leave ends one piece of a grouped transfer.
+func (t *Tracker) Leave(key string, err error) {
+	t.mu.Lock()
+	g := t.groups[key]
+	if g == nil {
+		t.mu.Unlock()
+		return
+	}
+	g.refs--
+	if g.refs > 0 {
+		t.mu.Unlock()
+		return
+	}
+	// More pieces usually follow immediately; end only after a quiet period.
+	g.timer = time.AfterFunc(3*time.Second, func() {
+		t.mu.Lock()
+		if t.groups[key] != g || g.refs > 0 {
+			t.mu.Unlock()
+			return
+		}
+		delete(t.groups, key)
+		t.mu.Unlock()
+		t.End(g.h, err)
+	})
+	t.mu.Unlock()
 }
 
 // Add records n transferred bytes.
@@ -215,15 +291,26 @@ func (t *Tracker) RemoveGuest(id string) {
 // Reset clears everything (new session).
 func (t *Tracker) Reset() {
 	t.mu.Lock()
+	var cancels []context.CancelFunc
 	for _, tr := range t.active {
 		if tr.cancel != nil {
-			tr.cancel()
+			cancels = append(cancels, tr.cancel)
 		}
 	}
 	t.active = map[string]*Handle{}
 	t.guests = map[string]*Guest{}
+	for _, g := range t.groups {
+		if g.timer != nil {
+			g.timer.Stop()
+		}
+	}
+	t.groups = map[string]*group{}
 	t.recent = nil
 	t.mu.Unlock()
+	// Cancel functions may call back into the tracker; never under t.mu.
+	for _, c := range cancels {
+		c()
+	}
 	t.totalUp.Store(0)
 	t.totalDown.Store(0)
 	t.changed()
