@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Sharebox
+GenericName=Folder sharing
+Comment=Share a folder with friends over the internet in one click
+Exec=sharebox
+Icon=sharebox
+Terminal=false
+Categories=Network;FileTransfer;Utility;
+StartupWMClass=Sharebox

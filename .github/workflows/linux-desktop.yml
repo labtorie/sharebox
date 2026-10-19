@@ -1,0 +1,61 @@
+# Builds the Linux desktop app (.deb + .tar.gz). The Linux build has to run
+# on Linux because Wails links against GTK 3 and WebKitGTK.
+# Run it from the Actions tab ("Run workflow") or by pushing a v* tag.
+name: Linux desktop build
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+jobs:
+  build:
+    # 22.04 gives the widest compatibility (glibc 2.35, WebKitGTK 4.1).
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install GTK/WebKit and test tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential pkg-config libgtk-3-dev libwebkit2gtk-4.1-dev xvfb dbus-x11
+
+      - name: Install Wails
+        run: go install github.com/wailsapp/wails/v2/cmd/wails@v2.17.0
+
+      - name: Build and package
+        run: scripts/package-linux.sh
+        env:
+          VERSION: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '1.0.0' }}
+
+
+      - name: Install the .deb
+        run: |
+          sudo apt-get install -y ./dist/desktop/sharebox_*_amd64.deb
+          test -x /usr/bin/sharebox
+          dpkg -L sharebox
+
+      - name: Smoke test (launch under a virtual display)
+        run: |
+          export SHAREBOX_CONFIG_DIR=$(mktemp -d)
+          set +e
+          dbus-run-session -- xvfb-run -a timeout 15 /usr/bin/sharebox
+          code=$?
+          set -e
+          # 124 = still running when the timeout stopped it, i.e. it started fine.
+          if [ "$code" != 124 ]; then echo "app exited early with code $code"; exit 1; fi
+          test -f "$SHAREBOX_CONFIG_DIR/sharebox.log" && echo "app started and wrote its log"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sharebox-linux-amd64
+          path: dist/desktop/*
+          if-no-files-found: error
