@@ -97,6 +97,7 @@ type Tracker struct {
 // group joins the parallel pieces of one transfer into a single entry.
 type group struct {
 	h       *Handle
+	ready   chan struct{} // closed once h is set
 	refs    int
 	timer   *time.Timer
 	cancels []context.CancelFunc
@@ -138,7 +139,11 @@ func (t *Tracker) Begin(guest string, kind Kind, name string, total int64, trans
 func (t *Tracker) Join(key, guest string, kind Kind, name string, total int64, transport string, cancel context.CancelFunc) *Handle {
 	t.mu.Lock()
 	if g := t.groups[key]; g != nil {
-		if _, alive := t.active[g.h.info.ID]; alive {
+		alive := g.h == nil // still being created by a concurrent piece
+		if !alive {
+			_, alive = t.active[g.h.info.ID]
+		}
+		if alive {
 			g.refs++
 			if cancel != nil {
 				g.cancels = append(g.cancels, cancel)
@@ -147,18 +152,21 @@ func (t *Tracker) Join(key, guest string, kind Kind, name string, total int64, t
 				g.timer.Stop()
 				g.timer = nil
 			}
-			h := g.h
 			t.mu.Unlock()
-			return h
+			<-g.ready
+			return g.h
 		}
 	}
-	t.mu.Unlock()
-	g := &group{refs: 1}
+	// Registered before Begin so pieces arriving at the same moment join
+	// this transfer instead of starting their own.
+	g := &group{refs: 1, ready: make(chan struct{})}
 	if cancel != nil {
 		g.cancels = []context.CancelFunc{cancel}
 	}
+	t.groups[key] = g
+	t.mu.Unlock()
 	// Cancelling the transfer from the host UI stops every piece.
-	g.h = t.Begin(guest, kind, name, total, transport, func() {
+	h := t.Begin(guest, kind, name, total, transport, func() {
 		t.mu.Lock()
 		cs := append([]context.CancelFunc(nil), g.cancels...)
 		t.mu.Unlock()
@@ -167,9 +175,10 @@ func (t *Tracker) Join(key, guest string, kind Kind, name string, total int64, t
 		}
 	})
 	t.mu.Lock()
-	t.groups[key] = g
+	g.h = h
 	t.mu.Unlock()
-	return g.h
+	close(g.ready)
+	return h
 }
 
 // Leave ends one piece of a grouped transfer.

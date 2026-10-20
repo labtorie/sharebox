@@ -150,9 +150,26 @@ func (c *Client) failPending() {
 }
 
 func (c *Client) session(ctx context.Context) error {
-	dctx, cancel := context.WithTimeout(ctx, 15*time.Second)
-	conn, _, err := websocket.Dial(dctx, c.ws, nil)
-	cancel()
+	// Some networks (VPN clients especially) drop a share of new
+	// connections; a few quick attempts keep one lost handshake from
+	// showing the host as offline.
+	var conn *websocket.Conn
+	var err error
+	for attempt := 0; attempt < 3; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(300 * time.Millisecond):
+			}
+		}
+		dctx, cancel := context.WithTimeout(ctx, 8*time.Second)
+		conn, _, err = websocket.Dial(dctx, c.ws, nil)
+		cancel()
+		if err == nil || ctx.Err() != nil {
+			break
+		}
+	}
 	if err != nil {
 		return fmt.Errorf("cannot reach the Sharebox server: %w", err)
 	}

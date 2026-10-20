@@ -10,9 +10,19 @@ import (
 
 func TestCleanRejectsTraversalAndOddNames(t *testing.T) {
 	bad := []string{
-		"..", "../x", "a/../../b", "a/..", "/../etc/passwd", "a\\..\\b", "C:\\Windows", "c:/windows",
-		"a\x00b", "file.txt:stream", "CON", "con.txt", "a/NUL", "LPT1.log", "COM9", "trail.", "trail ",
-		".sharebox-uploads", "x/.SHAREBOX-UPLOADS", "a/\x01", "\\\\server\\share", "a/b\\c",
+		"..", "../x", "a/../../b", "a/..", "/../etc/passwd", "a\\..\\b", "C:\\Windows",
+		"a\x00b", ".sharebox-uploads", "x/.SHAREBOX-UPLOADS", "a/\x01", "\\\\server\\share", "a/b\\c",
+	}
+	windowsOnly := []string{"file.txt:stream", "CON", "con.txt", "a/NUL", "LPT1.log", "COM9", "trail.", "trail ", "a|b", "c:/windows"}
+	if runtime.GOOS == "windows" {
+		bad = append(bad, windowsOnly...)
+	} else {
+		// Ordinary names on macOS and Linux; they must stay visible.
+		for _, p := range windowsOnly {
+			if _, err := Clean(p); err != nil {
+				t.Errorf("Clean(%q) rejected on %s", p, runtime.GOOS)
+			}
+		}
 	}
 	for _, p := range bad {
 		if _, err := Clean(p); err == nil {

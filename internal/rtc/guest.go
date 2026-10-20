@@ -245,7 +245,9 @@ func (g *Guest) Open(ctx context.Context, conn int) (*tunnel.Session, string, er
 	sess := tunnel.New(dcLink{dc}, tunnel.Options{OnClose: func(error) {
 		pc.Close()
 		if conn == 0 {
-			g.Close()
+			// Not inline: Close itself closes this session, and calling it
+			// again from inside its sync.Once would deadlock.
+			go g.Close()
 		}
 	}})
 	dc.SetBufferedAmountLowThreshold(p.LowWaterMark)

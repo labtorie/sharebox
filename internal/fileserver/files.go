@@ -262,6 +262,7 @@ func (s *Server) handleZip(w http.ResponseWriter, r *http.Request) {
 		if prefix != "" {
 			rel = strings.TrimPrefix(e.Path, prefix+"/")
 		}
+		rel = fsroot.Portable(rel)
 		if e.IsDir {
 			_, err := zw.CreateHeader(&zip.FileHeader{Name: rel + "/", Method: zip.Store, Modified: e.ModTime})
 			return err

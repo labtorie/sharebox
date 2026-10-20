@@ -17,6 +17,7 @@ package fsroot
 
 import (
 	"errors"
+	"runtime"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -66,6 +67,13 @@ func Clean(p string) (string, error) {
 	return strings.Join(out, "/"), nil
 }
 
+// windowsNames applies the Windows-only name rules (reserved characters such
+// as ':', trailing dots and spaces, device names). Those names are ordinary
+// files on macOS and Linux, e.g. "IMAGE 2026-10-20 17:56:36.jpg", and hiding
+// them there would make files silently disappear from the share. New names
+// from guests are made portable by SanitizeName either way.
+var windowsNames = runtime.GOOS == "windows"
+
 // ValidName validates a single path component (a file or folder name).
 func ValidName(c string) error {
 	if c == "" || c == "." || c == ".." || len(c) > maxComponentBytes || !utf8.ValidString(c) {
@@ -76,18 +84,24 @@ func ValidName(c string) error {
 			return ErrInvalidPath
 		}
 		switch r {
-		case '/', '\\', ':', '*', '?', '"', '<', '>', '|':
-			// ':' also blocks NTFS alternate data streams (file.txt:secret).
+		case '/', '\\':
 			return ErrInvalidPath
+		case ':', '*', '?', '"', '<', '>', '|':
+			// ':' also blocks NTFS alternate data streams (file.txt:secret).
+			if windowsNames {
+				return ErrInvalidPath
+			}
 		}
 	}
-	// Windows silently strips trailing dots and spaces, which would let
-	// "secret.txt." alias "secret.txt". Reject them everywhere.
-	if strings.HasSuffix(c, ".") || strings.HasSuffix(c, " ") {
-		return ErrInvalidPath
-	}
-	if isReservedWindowsName(c) {
-		return ErrInvalidPath
+	if windowsNames {
+		// Windows silently strips trailing dots and spaces, which would let
+		// "secret.txt." alias "secret.txt".
+		if strings.HasSuffix(c, ".") || strings.HasSuffix(c, " ") {
+			return ErrInvalidPath
+		}
+		if isReservedWindowsName(c) {
+			return ErrInvalidPath
+		}
 	}
 	if strings.EqualFold(c, InternalDirName) {
 		return ErrInvalidPath
@@ -172,4 +186,15 @@ func Split(p string) (dir, name string) {
 		return ".", p
 	}
 	return p[:i], p[i+1:]
+}
+
+// Portable replaces characters Windows does not allow in names (as in
+// SanitizeName), so archives built on macOS or Linux extract everywhere.
+func Portable(p string) string {
+	return strings.Map(func(r rune) rune {
+		if strings.ContainsRune(`:*?"<>|`, r) {
+			return '_'
+		}
+		return r
+	}, p)
 }
