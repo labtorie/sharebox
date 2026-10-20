@@ -80,12 +80,11 @@ Sharing with friends needs a deployed coordination server.
 ## Sharing with real people: deploy a coordination server
 
 Sharebox needs a small public server for links, signalling and the relay.
-This build has the shared server `https://sharebox-ppsus.waw0.amvera.tech`
-built in (`DefaultServerURL` in `internal/config/config.go`), so hosts don't
-have to configure anything. It runs on Amvera, which forwards HTTP only, so
-there is **no TURN relay** there: guests connect peer-to-peer, and guests on
-networks that block that can't connect. To run your own server instead, or a
-full one with the relay, you need:
+This build has the shared server `https://194-35-112-81.sslip.io` built in
+(`DefaultServerURL` in `internal/config/config.go`), so hosts don't have to
+configure anything. It is a full server on a VPS (signalling, guest web app
+and TURN relay), installed as described below. To run your own server
+instead, you need:
 
 * a VPS with a public IPv4 address,
 * a domain name (e.g. `share.example.org`) pointing at it,

@@ -7,6 +7,8 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"sync"
 
 	"sharebox/internal/fileserver"
@@ -36,7 +38,11 @@ type Settings struct {
 //	SHAREBOX_DEFAULT_SERVER=https://share.example.org scripts/build.sh
 //
 // which passes -ldflags "-X sharebox/internal/config.DefaultServerURL=…".
-var DefaultServerURL = "https://sharebox-ppsus.waw0.amvera.tech"
+var DefaultServerURL = "https://194-35-112-81.sslip.io"
+
+// formerDefaults are shared servers earlier builds used. Settings that still
+// point at one of them follow the current default.
+var formerDefaults = []string{"https://sharebox-ppsus.waw0.amvera.tech"}
 
 // DefaultServer returns the server to use when none is configured. The
 // SHAREBOX_SERVER environment variable (development) takes precedence.
@@ -118,7 +124,7 @@ func (s *Store) LoadSettings() Settings {
 	if st.MaxConcurrent <= 0 {
 		st.MaxConcurrent = 8
 	}
-	if st.ServerURL == "" {
+	if st.ServerURL == "" || slices.Contains(formerDefaults, strings.TrimRight(st.ServerURL, "/")) {
 		st.ServerURL = DefaultServer()
 	}
 	return st
