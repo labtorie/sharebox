@@ -7,7 +7,9 @@ import (
 	"log/slog"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
 	"sync"
 	"time"
@@ -224,11 +226,30 @@ func (a *App) OpenPreview() {
 	}
 }
 
-// RevealFolder opens the shared folder in Finder/Explorer.
-func (a *App) RevealFolder() {
-	if f := a.GetSettings().Folder; f != "" {
-		runtime.BrowserOpenURL(a.ctx, (&url.URL{Scheme: "file", Path: filepath.ToSlash(f)}).String())
+// RevealFolder opens the shared folder in Finder/Explorer. Wails refuses
+// file:// URLs in BrowserOpenURL, so the system file manager is run directly.
+func (a *App) RevealFolder() error {
+	f := a.GetSettings().Folder
+	if f == "" {
+		return errors.New("no folder is shared")
 	}
+	if _, err := os.Stat(f); err != nil {
+		return err
+	}
+	var cmd *exec.Cmd
+	switch goruntime.GOOS {
+	case "darwin":
+		cmd = exec.Command("open", f)
+	case "windows":
+		cmd = exec.Command("explorer", filepath.Clean(f))
+	default:
+		cmd = exec.Command("xdg-open", f)
+	}
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	go cmd.Wait() // explorer exits with 1 even on success; just reap it
+	return nil
 }
 
 // QRCode returns a PNG data URL for the link.

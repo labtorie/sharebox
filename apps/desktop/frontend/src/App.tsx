@@ -153,7 +153,7 @@ export default function App() {
               </div>
               <div className="flex gap-2">
                 {settings.folder && (
-                  <Button variant="ghost" onClick={() => Go.RevealFolder()} title="Show in Finder/Explorer"><FolderOpen className="h-4 w-4" /></Button>
+                  <Button variant="ghost" onClick={() => Go.RevealFolder().catch((e) => setError(errText(e)))} title="Show in Finder/Explorer"><FolderOpen className="h-4 w-4" /></Button>
                 )}
                 <Button onClick={choose} disabled={running}>{settings.folder ? "Change" : "Choose folder"}</Button>
               </div>
